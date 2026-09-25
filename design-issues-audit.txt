@@ -1,0 +1,220 @@
+﻿E-AMBULANCE -- FULL CODEBASE CSS / DESIGN ISSUES AUDIT
+=======================================================
+Generated: 2026-09-25
+Scope: src/ (all pages, components, globals.css)
+=======================================================
+
+CATEGORY 1 -- CSS SPECIFICITY BUGS (broken visuals)
+-----------------------------------------------------
+
+[BUG-01] input-field + pl-10 conflict -- AUTH LOGIN
+  Files   : src/app/auth/login/page.js  (lines 105, 127)
+  Problem : .input-field in globals.css sets padding shorthand (all 4 sides),
+            which overrides Tailwind pl-10 (padding-left only).
+            The Mail/Lock icons overlap the text — no left space for them.
+  Fix     : Add a .input-field-icon variant in globals.css with padding-left: 2.5rem,
+            or use inline style={{ paddingLeft: '2.5rem' }} on those inputs.
+
+[BUG-02] placeholder-text-muted is NOT a valid Tailwind class
+  Files   : src/app/auth/register/page.js  (lines 173,188,203,224,255,270)
+            src/app/user/book/page.js       (line 166)
+            src/app/admin/hospitals/page.js (lines 174,186,200,213)
+  Problem : Correct Tailwind v4 syntax is placeholder:text-muted (with colon).
+            placeholder-text-muted is silently ignored — placeholders use
+            browser default grey which may clash with the dark background.
+  Fix     : Replace all placeholder-text-muted with placeholder:text-muted.
+
+[BUG-03] hover:text-primary is NOT a valid design token
+  Files   : src/app/auth/register/page.js  (line 288)
+  Problem : text-primary is not defined as a utility. Only text-primary-light
+            and text-danger exist. The hover state silently does nothing.
+  Fix     : Replace hover:text-primary with hover:text-primary-light.
+
+[BUG-04] focus:ring-primary/50 and focus:border-primary/50 unreliable in TW v4
+  Files   : src/app/auth/register/page.js  (all inputs)
+            src/app/user/book/page.js       (line 166)
+            src/app/admin/hospitals/page.js (all form inputs)
+  Problem : In TailwindCSS v4, the /N opacity modifier on CSS-variable-based
+            colors (like primary mapped to oklch via DaisyUI) may not resolve
+            correctly, making focus rings invisible.
+  Fix     : Use concrete rgba in globals.css .input-field:focus (already done
+            for login), or use focus:ring-red-500/40 as a concrete value.
+
+
+CATEGORY 2 -- GLASSMORPHISM / BACKGROUND DEPTH BROKEN
+------------------------------------------------------
+
+[BUG-05] Auth login background glows invisible
+  File    : src/app/auth/login/page.js  (ambient glow divs)
+  Problem : Glows use opacity-20 and blur-[120px] on pure black background.
+            backdrop-filter on the card blurs pure black -> still pure black.
+            No visual depth at all.
+  Fix     : Use opacity 30-40%, reduce blur to 80px, add gradient-hero class
+            to the page wrapper div.
+
+[BUG-06] Auth register background glows barely exist
+  File    : src/app/auth/register/page.js  (lines 109-110)
+  Problem : bg-primary/5 and bg-primary/3 = 3-5% opacity, completely invisible.
+  Fix     : Raise to bg-primary/15 minimum, or use rgba(220,38,38,0.18).
+
+[BUG-07] Auth login card accent line may escape card boundary
+  File    : src/app/auth/login/page.js  (card div)
+  Problem : The absolute top-0 red accent line needs a position:relative parent.
+            The card panel div does not have relative — it may position wrongly.
+  Fix     : Add relative className to the card panel div.
+
+
+CATEGORY 3 -- MISSING TAILWIND TOKENS (@theme gaps)
+----------------------------------------------------
+
+[BUG-08] bg-surface-elevated token missing from @theme
+  Files   : src/app/auth/register/page.js, src/app/user/track/.../page.js,
+            src/app/driver/page.js, src/app/admin/hospitals/page.js,
+            src/app/admin/drivers/page.js
+  Problem : --surface-elevated is in :root but NOT in @theme {}.
+            Tailwind v4 only generates bg-surface-elevated if it is in @theme.
+            Without it the class is a no-op -- inputs and cards get no background.
+  Fix     : Add --color-surface-elevated: var(--surface-elevated); to @theme.
+
+[BUG-09] bg-surface-hover token missing from @theme
+  Files   : src/app/auth/register/page.js (line 152)
+            src/app/admin/bookings/page.js, src/app/admin/drivers/page.js
+  Problem : Same as BUG-08. bg-surface-hover generates no CSS rule.
+  Fix     : Add --color-surface-hover: var(--surface-hover); to @theme.
+
+[BUG-10] bg-purple-500, text-purple-400 outside design system
+  Files   : src/app/admin/page.js (line 77), src/lib/constants.js (line 44)
+  Problem : Raw Tailwind palette colors not in design token system.
+            Visually inconsistent with the rest of the UI.
+  Fix     : Add --color-accent-purple token or replace with info (sky blue).
+
+
+CATEGORY 4 -- LAYOUT / SPACING ISSUES
+--------------------------------------
+
+[BUG-11] Auth login page -- huge dead black space above and below card
+  File    : src/app/auth/login/page.js
+  Problem : min-h-screen flex items-center justify-center creates ~200px of
+            empty void above and below the card. Combined with invisible glows
+            (BUG-05) it looks like a card floating in nothingness.
+  Fix     : Add visible background decoration -- a grid pattern overlay,
+            stronger ambient glows, or a radial gradient on the page wrapper.
+
+[BUG-12] Navbar height vs pt-24 fragile coupling
+  Files   : All dashboard/app pages (9 files use pt-24)
+  Problem : Navbar is h-16 (64px). pt-24 = 96px. Works now but if navbar
+            height changes, all 9 pages need manual updating.
+  Fix     : Define --navbar-height CSS variable and use it consistently.
+
+[BUG-13] Register page scrolls off gradient background
+  File    : src/app/auth/register/page.js  (line 98)
+  Problem : gradient-hero is not fixed -- it scrolls with the page. The lower
+            half of the long register form shows flat dark background.
+  Fix     : Use fixed position background blobs like the login page approach.
+
+
+CATEGORY 5 -- COMPONENT DESIGN INCONSISTENCIES
+-----------------------------------------------
+
+[BUG-14] Register page logo uses heart SVG, not Ambulance icon
+  File    : src/app/auth/register/page.js  (lines 118-120)
+  Problem : The logo renders a heart/favourite SVG path instead of the Ambulance
+            icon used everywhere else. Inconsistent branding.
+  Fix     : Import Ambulance from lucide-react and use it.
+
+[BUG-15] Emoji icons mixed with Lucide icon system
+  Files   : src/app/admin/page.js  (lines 73-78) -- ambulance, check, clipboard, user, hospital emoji
+            src/app/user/page.js   (lines 109-112)
+  Problem : Emojis render differently across OS (Android vs Windows vs macOS).
+            All other components use Lucide icons. Inconsistent system.
+  Fix     : Replace all emoji with Lucide equivalents.
+
+[BUG-16] Empty state uses emoji instead of icon
+  File    : src/app/user/page.js  (line 138)
+  Fix     : Replace ambulance emoji with <Ambulance /> in a styled container.
+
+[BUG-17] Admin booking table uses raw status string, not StatusBadge
+  File    : src/app/admin/page.js  (lines 135-142)
+  Problem : Status is rendered with an inline ternary className string. Shows
+            raw values like en_route_pickup instead of human-readable labels.
+            Also misses the glow dot that StatusBadge provides.
+  Fix     : Replace with <StatusBadge status={booking.status} />.
+
+[BUG-18] Two sources of truth for status display config
+  Files   : src/lib/constants.js  (status display config with bg-purple-500/20)
+            src/components/ui/StatusBadge.js (its own STATUS config map)
+  Problem : StatusBadge was rewritten to be self-contained but constants.js
+            still has a separate status display config that other files may
+            reference. Out of sync -- purple colors in one, not the other.
+  Fix     : Keep BOOKING_STATUS enum in constants.js, remove display config
+            from it and centralise in StatusBadge only.
+
+
+CATEGORY 6 -- FONT LOADING
+---------------------------
+
+[BUG-19] Font variables declared twice -- @theme overrides Next.js injection
+  Files   : src/app/layout.js (line 25) -- Next.js adds --font-sans, --font-display
+            src/app/globals.css (lines 61-62) -- @theme also declares them
+  Problem : In TailwindCSS v4, @theme tokens may take precedence over the CSS
+            variable injected by Next.js font system on <html>. The loaded Google
+            Fonts (Inter, Plus Jakarta Sans) could be overridden by the fallback
+            stack declared in @theme.
+  Fix     : Remove --font-sans and --font-display from @theme and let Next.js
+            font injection be the single source of truth.
+
+
+CATEGORY 7 -- ANIMATION / ACCESSIBILITY ISSUES
+-----------------------------------------------
+
+[BUG-20] stagger-children sets opacity:0 permanently if motion is reduced
+  File    : src/app/globals.css  (lines 186-197)
+  Problem : .stagger-children > * sets opacity: 0 as base. If a user has
+            prefers-reduced-motion: reduce set, the animation won't run and
+            elements stay permanently invisible.
+  Fix     : Add @media (prefers-reduced-motion: reduce) block:
+            .stagger-children > * { opacity: 1; animation: none; }
+
+[BUG-21] animate-slide-up causes flash of invisible content on SSR
+  Files   : Multiple pages -- admin, user, driver dashboards
+  Problem : animate-slide-up starts at opacity:0. In Next.js SSR the initial
+            HTML has opacity:0 before hydration triggers the animation. On slow
+            connections this produces a flash of invisible content (FOIC).
+  Fix     : animation-fill-mode: both is already set (good). Additionally add
+            a noscript-safe fallback or wrap in a client-only animation trigger.
+
+
+=======================================================
+PRIORITY SUMMARY
+=======================================================
+
+  CRITICAL -- broken visuals, invisible elements:
+    BUG-01  input-field + pl-10 conflict (icon overlap on login)
+    BUG-05  Auth login background glows invisible
+    BUG-06  Auth register background glows invisible
+    BUG-08  bg-surface-elevated token missing from @theme
+    BUG-09  bg-surface-hover token missing from @theme
+
+  HIGH -- wrong behavior, inconsistent UI:
+    BUG-02  placeholder-text-muted invalid class (all forms)
+    BUG-03  hover:text-primary undefined token
+    BUG-07  Card accent line positioning bug
+    BUG-11  Login page dead black space
+    BUG-14  Register page uses heart icon not ambulance
+    BUG-17  Admin table uses raw status string not StatusBadge
+    BUG-18  Two sources of truth for status display config
+
+  MEDIUM -- polish and consistency:
+    BUG-04  focus:ring-primary/50 unreliable in TW v4
+    BUG-10  Purple tokens outside design system
+    BUG-12  Navbar height vs pt-24 fragile coupling
+    BUG-13  Register page scrolls off gradient background
+    BUG-15  Emoji icons vs Lucide icon system
+    BUG-16  Emoji in empty states
+    BUG-19  Duplicate font variable declarations
+    BUG-20  stagger-children ignores prefers-reduced-motion
+    BUG-21  Flash of invisible content on SSR
+
+=======================================================
+Total Issues Found: 21
+=======================================================
