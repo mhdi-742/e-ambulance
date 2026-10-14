@@ -37,10 +37,27 @@ export async function updateSession(request) {
   const publicPaths = ['/', '/auth/login', '/auth/register'];
   const isPublicPath = publicPaths.includes(request.nextUrl.pathname);
 
+  // Redirect unauthenticated users to login (except public pages)
   if (!user && !isPublicPath) {
     const url = request.nextUrl.clone();
     url.pathname = '/auth/login';
     return NextResponse.redirect(url);
+  }
+
+  // 1.3 FIX: Role-based route protection for /admin/*
+  // Only users with role='admin' can access admin routes
+  if (user && request.nextUrl.pathname.startsWith('/admin')) {
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('role')
+      .eq('id', user.id)
+      .single();
+
+    if (!profile || profile.role !== 'admin') {
+      const url = request.nextUrl.clone();
+      url.pathname = '/user';
+      return NextResponse.redirect(url);
+    }
   }
 
   return supabaseResponse;

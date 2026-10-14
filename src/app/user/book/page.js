@@ -9,7 +9,7 @@ import TrackingMap from '@/components/map/TrackingMap';
 import { useSession } from '@/hooks/useSession';
 import { useLocation } from '@/hooks/useLocation';
 import { useCreateBooking } from '@/hooks/useBooking';
-import { HOSPITALS, CITY_CENTER } from '@/lib/constants';
+import { CITY_CENTER } from '@/lib/constants';
 import { getSupabaseBrowserClient } from '@/lib/supabase/client';
 
 export default function BookAmbulancePage() {
@@ -30,15 +30,20 @@ export default function BookAmbulancePage() {
 
   useEffect(() => {
     const fetchHospitals = async () => {
-      const { data } = await supabase
+      // 4.1 FIX: Always fetch active hospitals from the DB; never fall back to dummy mock constants
+      const { data, error } = await supabase
         .from('hospitals')
         .select('*')
-        .eq('is_active', true);
+        .eq('is_active', true)
+        .order('name');
 
       if (data && data.length > 0) {
         setHospitals(data);
       } else {
-        setHospitals(HOSPITALS);
+        setHospitals([]);
+        if (error) {
+          console.error('Failed to load active hospitals from database:', error);
+        }
       }
     };
     fetchHospitals();

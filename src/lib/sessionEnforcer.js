@@ -3,6 +3,14 @@ import { getSupabaseBrowserClient } from '@/lib/supabase/client';
 
 const SESSION_KEY = 'e_ambulance_session_token';
 
+// 2.3 FIX: Safe storage accessor to prevent crashes during SSR
+function getStorage() {
+  if (typeof window !== 'undefined') {
+    return window.localStorage;
+  }
+  return null;
+}
+
 /**
  * Generate a new session token and store it both locally and in the DB.
  */
@@ -22,7 +30,10 @@ export async function createSession(userId) {
   }
 
   // Store locally
-  localStorage.setItem(SESSION_KEY, token);
+  const storage = getStorage();
+  if (storage) {
+    storage.setItem(SESSION_KEY, token);
+  }
   return token;
 }
 
@@ -31,11 +42,12 @@ export async function createSession(userId) {
  * Returns true if valid, false if another device has taken over.
  */
 export async function validateSession(userId) {
-  const supabase = getSupabaseBrowserClient();
-  const localToken = localStorage.getItem(SESSION_KEY);
+  const storage = getStorage();
+  const localToken = storage ? storage.getItem(SESSION_KEY) : null;
 
   if (!localToken) return false;
 
+  const supabase = getSupabaseBrowserClient();
   const { data, error } = await supabase
     .from('profiles')
     .select('session_token')
@@ -51,7 +63,10 @@ export async function validateSession(userId) {
  * Clear local session
  */
 export function clearSession() {
-  localStorage.removeItem(SESSION_KEY);
+  const storage = getStorage();
+  if (storage) {
+    storage.removeItem(SESSION_KEY);
+  }
 }
 
 /**
@@ -73,7 +88,8 @@ export function subscribeToSessionChanges(userId, onKicked) {
       },
       (payload) => {
         const newToken = payload.new.session_token;
-        const localToken = localStorage.getItem(SESSION_KEY);
+        const storage = getStorage();
+        const localToken = storage ? storage.getItem(SESSION_KEY) : null;
 
         if (newToken && localToken && newToken !== localToken) {
           onKicked();

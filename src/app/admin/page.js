@@ -58,9 +58,15 @@ export default function AdminDashboard() {
 
     fetchDashboard();
 
-    const interval = setInterval(fetchDashboard, 30000);
+    const interval = setInterval(() => {
+      // 7.3 FIX: Pause polling when tab is in background to save resources
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        fetchDashboard();
+      }
+    }, 30000);
+
     return () => clearInterval(interval);
-  }, [supabase]);
+  }, []); // 12.3 FIX: Empty deps array prevents infinite effect re-trigger
 
   if (authLoading || loading) {
     return (

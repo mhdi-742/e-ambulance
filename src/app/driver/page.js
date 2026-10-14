@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import Navbar from '@/components/layout/Navbar';
 import StatusBadge from '@/components/ui/StatusBadge';
@@ -22,7 +22,8 @@ export default function DriverDashboard() {
   const [activeTrip, setActiveTrip] = useState(null);
   const [toast, setToast] = useState(null);
   const [accepting, setAccepting] = useState(null);
-  const [broadcastRef, setBroadcastRef] = useState(null);
+  // 12.2 FIX: Use ref instead of state to avoid stale closure during unmount/status change
+  const broadcastRef = useRef(null);
 
   const supabase = getSupabaseBrowserClient();
   const { currentLocation } = useDriverLocation(driverData?.id, isOnline);
@@ -50,15 +51,18 @@ export default function DriverDashboard() {
 
       if (data) {
         setActiveTrip(data);
-        const broadcast = startLocationBroadcast(data.id, driverData.id);
-        setBroadcastRef(broadcast);
+        if (broadcastRef.current) broadcastRef.current.stop();
+        broadcastRef.current = startLocationBroadcast(data.id, driverData.id);
       }
     };
 
     fetchActiveTrip();
 
     return () => {
-      if (broadcastRef) broadcastRef.stop();
+      if (broadcastRef.current) {
+        broadcastRef.current.stop();
+        broadcastRef.current = null;
+      }
     };
   }, [driverData, supabase]);
 
@@ -101,8 +105,8 @@ export default function DriverDashboard() {
 
       if (data) {
         setActiveTrip(data);
-        const broadcast = startLocationBroadcast(data.id, driverData.id);
-        setBroadcastRef(broadcast);
+        if (broadcastRef.current) broadcastRef.current.stop();
+        broadcastRef.current = startLocationBroadcast(data.id, driverData.id);
       }
     }
     setAccepting(null);
@@ -122,7 +126,19 @@ export default function DriverDashboard() {
       setToast({ message: `Status updated to ${newStatus}`, type: 'success' });
 
       if (newStatus === BOOKING_STATUS.COMPLETED || newStatus === BOOKING_STATUS.CANCELLED) {
-        if (broadcastRef) broadcastRef.stop();
+        if (broadcastRef.current) {
+          broadcastRef.current.stop();
+          broadcastRef.current = null;
+        }
+
+        // 4.3 FIX: Reset driver is_busy flag so driver is available for new dispatches
+        if (driverData?.id) {
+          await supabase
+            .from('drivers')
+            .update({ is_busy: false })
+            .eq('id', driverData.id);
+        }
+
         setActiveTrip(null);
       } else {
         setActiveTrip((prev) => ({ ...prev, status: newStatus }));

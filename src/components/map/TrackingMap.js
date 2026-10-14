@@ -91,8 +91,7 @@ export default function TrackingMap({
   status,
 }) {
   const [apiError, setApiError] = useState(false);
-  const rawKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY || '';
-  const apiKey = rawKey.startsWith('YAIza') ? rawKey.slice(1) : rawKey;
+  const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY || '';
 
   const pointsToBound = useMemo(() => {
     const list = [];

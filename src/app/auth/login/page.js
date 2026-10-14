@@ -50,10 +50,19 @@ function LoginForm() {
     }
   };
 
+  const wasKicked = searchParams.get('kicked') === '1';
+
   return (
     <>
       {toast && (
         <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />
+      )}
+
+      {/* 2.4 FIX: Show explanation when user is kicked out by single-device enforcer */}
+      {wasKicked && (
+        <div className="mb-4 p-3 rounded-lg border border-amber-600/50 bg-amber-950/40 text-amber-200 text-xs text-center">
+          You were signed out because your account was accessed from another device.
+        </div>
       )}
 
       {/* Header */}
@@ -87,9 +96,18 @@ function LoginForm() {
         </div>
 
         <div>
-          <label className="block text-xs font-medium text-zinc-300 mb-1.5">
-            Password
-          </label>
+          <div className="flex items-center justify-between mb-1.5">
+            <label className="block text-xs font-medium text-zinc-300">
+              Password
+            </label>
+            {/* 2.2 FIX: Forgot Password link */}
+            <Link
+              href="/auth/reset-password"
+              className="text-xs text-red-400 hover:underline"
+            >
+              Forgot password?
+            </Link>
+          </div>
           <input
             id="login-password"
             type="password"

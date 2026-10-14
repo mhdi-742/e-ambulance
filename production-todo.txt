@@ -6,21 +6,21 @@
 
 === 1. SECURITY (Critical) ===
 
-[  ] 1.1  .env.local is NOT in .gitignore — raw Supabase keys and Google
+[OK] 1.1  .env.local is NOT in .gitignore — raw Supabase keys and Google
           Maps API key are committed. Add .env.local to .gitignore and
           rotate every exposed key immediately.
 
-[  ] 1.2  Anyone can register as "admin" — registration page lets users
+[OK] 1.2  Anyone can register as "admin" — registration page lets users
           choose any role including admin. Remove "admin" from the
           client-side role selector; admin accounts should only be
           created via a backend/seed script or Supabase dashboard.
 
-[  ] 1.3  Middleware does NOT enforce role-based route protection.
+[OK] 1.3  Middleware does NOT enforce role-based route protection.
           /admin/* is accessible to any logged-in user (user or driver).
           Add role checks in middleware.js or in each admin page's
           server-side logic to redirect non-admin users.
 
-[  ] 1.4  Supabase RLS policies for bookings are too permissive — any
+[OK] 1.4  Supabase RLS policies for bookings are too permissive — any
           driver can UPDATE any pending booking's fields (not just
           status/driver_id). Tighten the "Drivers can accept pending
           bookings" policy to restrict which columns can be changed.
@@ -37,7 +37,7 @@
           domain and APIs (Maps JavaScript API, Directions API) in the
           Google Cloud Console to prevent abuse and billing overruns.
 
-[  ] 1.8  The TrackingMap.js has a suspicious key hack:
+[OK] The TrackingMap.js has a suspicious key hack:
           `rawKey.startsWith('YAIza') ? rawKey.slice(1) : rawKey`
           This suggests the key was stored with a leading 'Y' prefix.
           Clean this up — use the correct key directly.
@@ -57,14 +57,14 @@
           access the app without confirming their email. Enable Supabase
           email confirmation and add a "verify your email" interstitial.
 
-[  ] 2.2  No "Forgot Password" / password reset flow. Add a reset
+[OK] No "Forgot Password" / password reset flow. Add a reset
           password page and link it from the login form.
 
-[  ] 2.3  Session enforcer (sessionEnforcer.js) relies on localStorage
+[OK] Session enforcer (sessionEnforcer.js) relies on localStorage
           which is browser-only — will crash if accidentally imported
           server-side. Add a typeof window check or restructure.
 
-[  ] 2.4  The sessionKicked state in useSession is set but never shown
+[OK] The sessionKicked state in useSession is set but never shown
           to the user — they get silently signed out. Show a modal or
           redirect to a "kicked from session" page explaining why.
 
@@ -72,7 +72,7 @@
           user is on an active trip, they lose tracking. Handle
           SIGNED_OUT / TOKEN_REFRESHED events gracefully.
 
-[  ] 2.6  Driver registration creates a driver record client-side after
+[OK] Driver registration creates a driver record client-side after
           signup. If the insert fails (line 66-74 in register/page.js),
           the user ends up with a driver role but no driver record.
           Move this to a database trigger or server action.
@@ -86,13 +86,13 @@
 [  ] 3.2  No "About Us" / "Contact Us" / "Terms of Service" / "Privacy
           Policy" pages. These are legally required for production.
 
-[  ] 3.3  No 404 page (not-found.js). Users hitting invalid routes see
+[OK] No 404 page (not-found.js). Users hitting invalid routes see
           a raw Next.js error or blank page.
 
-[  ] 3.4  No global error boundary (error.js). Unhandled errors crash
+[OK] No global error boundary (error.js). Unhandled errors crash
           the entire UI with no recovery option.
 
-[  ] 3.5  No loading.js files for route-level streaming/loading states.
+[OK] No loading.js files for route-level streaming/loading states.
 
 [  ] 3.6  No admin ability to edit a hospital (only add/delete/toggle).
           Add an edit modal with pre-filled fields.
@@ -125,7 +125,7 @@
           turn-by-turn or Google Maps navigation integration on their
           dashboard during active trips.
 
-[  ] 3.16 No SOS / emergency call button — for a medical emergency app,
+[OK] No SOS / emergency call button — for a medical emergency app,
           a prominent "Call 108" or "Call 112" emergency button is
           essential on every page.
 
@@ -136,7 +136,7 @@
 
 === 4. DATA & DATABASE ===
 
-[  ] 4.1  Hospitals are hardcoded in constants.js AND in the database.
+[OK] Hospitals are hardcoded in constants.js AND in the database.
           The book page falls back to constants if DB returns empty.
           This creates data inconsistency. Use DB as single source of
           truth and remove the hardcoded HOSPITALS array.
@@ -145,7 +145,7 @@
           user bookings fetch ALL records. This will break at scale.
           Add cursor-based or offset pagination everywhere.
 
-[  ] 4.3  Driver's is_busy flag is not reset when a trip is completed.
+[OK] Driver's is_busy flag is not reset when a trip is completed.
           updateTripStatus() doesn't toggle is_busy = false on
           COMPLETED status. This leaves drivers stuck as "busy".
 
@@ -183,7 +183,7 @@
           desktop browsers or in poor signal areas, the app just shows
           an error. Add manual address entry or map-click-to-locate.
 
-[  ] 5.3  useDriverLocation has currentLocation in its useEffect deps
+[OK] useDriverLocation has currentLocation in its useEffect deps
           array — this causes the effect to re-run on every location
           update, creating infinite re-renders and re-subscriptions.
           This is a bug that will drain battery and CPU.
@@ -205,25 +205,25 @@
 
 === 6. UX / UI / ACCESSIBILITY ===
 
-[  ] 6.1  Navbar is not responsive — on mobile screens, nav links
+[OK] Navbar is not responsive — on mobile screens, nav links
           overflow horizontally. Need a hamburger menu / mobile drawer.
 
-[  ] 6.2  No favicon or PWA manifest — the app has no icon, no splash
+[OK] No favicon or PWA manifest — the app has no icon, no splash
           screen, and can't be "installed" on mobile. For an emergency
           app, PWA support is critical.
 
-[  ] 6.3  StatusBadge always shows a red dot regardless of status.
+[OK] StatusBadge always shows a red dot regardless of status.
           Completed should be green, cancelled should be gray, active
           states should be amber/yellow.
 
-[  ] 6.4  Toast component doesn't auto-dismiss — requires manual close.
+[OK] Toast component doesn't auto-dismiss — requires manual close.
           Add a setTimeout auto-dismiss after 3-5 seconds.
 
-[  ] 6.5  Toast doesn't distinguish visually between error/success/info
+[OK] Toast doesn't distinguish visually between error/success/info
           types — always renders with the same zinc border. Use color
           coding (red border for error, green for success, etc.).
 
-[  ] 6.6  Modal doesn't close on backdrop click or Escape key press.
+[OK] Modal doesn't close on backdrop click or Escape key press.
           Add these standard behaviors.
 
 [  ] 6.7  No keyboard navigation support — forms work but interactive
@@ -263,7 +263,7 @@
           via getSupabaseBrowserClient() called at component top level.
           Move to useMemo or a shared context.
 
-[  ] 7.3  Admin dashboard polls every 30 seconds via setInterval even
+[OK] Admin dashboard polls every 30 seconds via setInterval even
           when the tab is not visible. Use document.visibilityState
           to pause polling when hidden.
 
@@ -307,7 +307,7 @@
           if NEXT_PUBLIC_SUPABASE_URL or API keys are missing.
           Add runtime checks with clear error messages.
 
-[  ] 9.3  No production build tested — only dev server (npm run dev).
+[OK] No production build tested — only dev server (npm run dev).
           Run `npm run build` to check for build-time errors.
 
 [  ] 9.4  No health check endpoint for monitoring.
@@ -330,7 +330,7 @@
 
 === 10. MOBILE & PWA ===
 
-[  ] 10.1 No manifest.json / web app manifest for PWA installation.
+[OK] No manifest.json / web app manifest for PWA installation.
 
 [  ] 10.2 No service worker for caching/offline support.
 
@@ -367,25 +367,25 @@
 
 === 12. CODE QUALITY & BUGS ===
 
-[  ] 12.1 useDriverLocation.js — currentLocation in the useEffect
+[OK] useDriverLocation.js — currentLocation in the useEffect
           dependency array causes infinite re-renders. Use a ref
           instead.
 
-[  ] 12.2 Driver page — broadcastRef in the cleanup function captures
+[OK] Driver page — broadcastRef in the cleanup function captures
           a stale closure. The useEffect dependency array includes
           [driverData, supabase] but broadcastRef is read from state
           outside the effect.
 
-[  ] 12.3 Admin dashboard — fetchDashboard is defined inside useEffect
+[OK] Admin dashboard — fetchDashboard is defined inside useEffect
           but supabase is in the dep array. supabase is recreated on
           every render from getSupabaseBrowserClient(), causing the
           effect to re-run infinitely. Same issue in multiple files.
 
-[  ] 12.4 Admin bookings page — fetchBookings is not wrapped in
+[OK] Admin bookings page — fetchBookings is not wrapped in
           useCallback and is called from both useEffect hooks but
           isn't in the dependency arrays. ESLint would flag this.
 
-[  ] 12.5 Navbar calls getSupabaseBrowserClient() at the component
+[OK] Navbar calls getSupabaseBrowserClient() at the component
           body level (not in a hook or effect), creating a new client
           reference on every render.
 
@@ -398,13 +398,38 @@
 [  ] 12.8 CLAUDE.md exists but contains only 11 bytes — either
           populate it with useful project context or remove it.
 
+[OK] 12.9 Session enforcer race condition BREAKS driver login.
+          In useSession.js, the Realtime subscription on
+          profiles.session_token starts BEFORE createSession()
+          writes the new token to localStorage. When the DB
+          update arrives via Realtime, the local token is still
+          stale/empty -> token mismatch -> onKicked() fires ->
+          user is signed out immediately after login. This is
+          the root cause of drivers being unable to log in.
+          FIX: Either delay subscribing to session changes until
+          after createSession() completes, or skip the first
+          Realtime event after login.
+
+[OK] 12.10 useDriverLocation stale closure - the setInterval
+           callback in useDriverLocation.js captures the
+           currentLocation value at creation time. Because
+           currentLocation is in the useEffect dependency array,
+           the interval is torn down and recreated on every GPS
+           tick (before it ever fires its 5-second callback).
+           Result: drivers.current_lat/current_lng in the DB is
+           almost never updated via this hook. The fallback
+           location shown to users (when Realtime broadcast is
+           missed) will be stale. FIX: Store currentLocation in
+           a ref and remove it from the dependency array.
+
 
 =========================================================
   PRIORITY SUMMARY
 =========================================================
 
   🔴 P0 — Must fix before any public deployment:
-     1.1, 1.2, 1.3, 1.7, 2.1, 4.3, 5.3, 12.1, 12.3
+     1.1, 1.2, 1.3, 1.7, 2.1, 4.3, 5.3, 12.1, 12.3,
+     12.9, 12.10
 
   🟠 P1 — Should fix before production launch:
      1.4, 1.9, 2.2, 2.6, 3.3, 3.4, 3.12, 3.16, 3.17,

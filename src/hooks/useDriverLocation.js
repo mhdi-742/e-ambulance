@@ -7,12 +7,17 @@ import { LOCATION_UPDATE_INTERVAL } from '@/lib/constants';
 /**
  * Hook for driver location broadcasting
  * Sends location updates every 5 seconds when driver is on an active trip
+ *
+ * 12.10 FIX: Use a ref for currentLocation instead of putting it in the
+ * useEffect dependency array. This prevents the infinite teardown/rebuild
+ * cycle and lets the setInterval actually fire its 5-second callback.
  */
 export function useDriverLocation(driverId, isActive = false) {
   const [currentLocation, setCurrentLocation] = useState(null);
   const [error, setError] = useState(null);
   const watchIdRef = useRef(null);
   const intervalRef = useRef(null);
+  const locationRef = useRef(null); // 12.10 FIX: stable ref for interval callback
   const supabase = getSupabaseBrowserClient();
 
   const updateDriverLocation = useCallback(async (lat, lng) => {
@@ -44,6 +49,7 @@ export function useDriverLocation(driverId, isActive = false) {
           lng: position.coords.longitude,
         };
         setCurrentLocation(loc);
+        locationRef.current = loc; // 12.10 FIX: keep ref in sync
       },
       (err) => {
         setError(err.message);
@@ -55,10 +61,11 @@ export function useDriverLocation(driverId, isActive = false) {
       }
     );
 
-    // Update DB every 5 seconds
+    // Update DB every 5 seconds — reads from ref, not state
     intervalRef.current = setInterval(() => {
-      if (currentLocation) {
-        updateDriverLocation(currentLocation.lat, currentLocation.lng);
+      const loc = locationRef.current; // 12.10 FIX: read from ref
+      if (loc) {
+        updateDriverLocation(loc.lat, loc.lng);
       }
     }, LOCATION_UPDATE_INTERVAL);
 
@@ -70,7 +77,7 @@ export function useDriverLocation(driverId, isActive = false) {
         clearInterval(intervalRef.current);
       }
     };
-  }, [isActive, driverId, currentLocation, updateDriverLocation]);
+  }, [isActive, driverId, updateDriverLocation]); // 12.10 FIX: removed currentLocation from deps
 
   return { currentLocation, error };
 }

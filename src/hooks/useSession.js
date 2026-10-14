@@ -1,11 +1,15 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { getSupabaseBrowserClient } from '@/lib/supabase/client';
 import { createSession, validateSession, clearSession, subscribeToSessionChanges } from '@/lib/sessionEnforcer';
 
 /**
  * Hook for auth state and session management
+ *
+ * 12.9 FIX: The Realtime session listener now skips the first token change
+ * after login to avoid the race condition where createSession() updates
+ * the DB token before localStorage is written, causing an immediate kick.
  */
 export function useSession() {
   const [user, setUser] = useState(null);
@@ -13,6 +17,9 @@ export function useSession() {
   const [driverData, setDriverData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [sessionKicked, setSessionKicked] = useState(false);
+
+  // Track whether we just created a session to suppress the first Realtime event
+  const justCreatedSessionRef = useRef(false);
 
   const supabase = getSupabaseBrowserClient();
 
@@ -60,7 +67,10 @@ export function useSession() {
         if (event === 'SIGNED_IN' && session?.user) {
           setUser(session.user);
           await fetchProfile(session.user.id);
-          // Create new session token for single-device enforcement
+
+          // 12.9 FIX: Set flag BEFORE creating session so the Realtime
+          // listener knows to ignore the next token change
+          justCreatedSessionRef.current = true;
           await createSession(session.user.id);
         } else if (event === 'SIGNED_OUT') {
           setUser(null);
@@ -79,8 +89,20 @@ export function useSession() {
     if (!user) return;
 
     const unsubscribe = subscribeToSessionChanges(user.id, () => {
+      // 12.9 FIX: If we just created a session, this is our own token
+      // update echoing back via Realtime — skip it, don't kick ourselves out
+      if (justCreatedSessionRef.current) {
+        justCreatedSessionRef.current = false;
+        return;
+      }
+
       setSessionKicked(true);
-      supabase.auth.signOut();
+      clearSession();
+      supabase.auth.signOut().then(() => {
+        if (typeof window !== 'undefined') {
+          window.location.href = '/auth/login?kicked=1';
+        }
+      });
     });
 
     return unsubscribe;

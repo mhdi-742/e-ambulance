@@ -52,6 +52,8 @@ export default function RegisterPage() {
           full_name: formData.fullName,
           phone: formData.phone,
           role: formData.role,
+          vehicle_number: formData.vehicleNumber || '',
+          vehicle_type: formData.vehicleType || 'basic',
         },
       },
     });
@@ -62,15 +64,19 @@ export default function RegisterPage() {
       return;
     }
 
+    // 2.6 FIX: If role is driver, ensure driver record exists via idempotent upsert
     if (formData.role === 'driver' && data.user) {
-      const { error: driverError } = await supabase.from('drivers').insert({
-        profile_id: data.user.id,
-        vehicle_number: formData.vehicleNumber,
-        vehicle_type: formData.vehicleType,
-      });
+      const { error: driverError } = await supabase.from('drivers').upsert(
+        {
+          profile_id: data.user.id,
+          vehicle_number: formData.vehicleNumber || 'PENDING',
+          vehicle_type: formData.vehicleType || 'basic',
+        },
+        { onConflict: 'profile_id' }
+      );
 
       if (driverError) {
-        console.error('Driver record creation failed:', driverError);
+        console.error('Driver record upsert failed:', driverError);
       }
     }
 
@@ -78,15 +84,10 @@ export default function RegisterPage() {
     setToast({ message: 'Account created successfully!', type: 'success' });
 
     setTimeout(() => {
-      switch (formData.role) {
-        case 'driver':
-          router.push('/driver');
-          break;
-        case 'admin':
-          router.push('/admin');
-          break;
-        default:
-          router.push('/user');
+      if (formData.role === 'driver') {
+        router.push('/driver');
+      } else {
+        router.push('/user');
       }
     }, 1000);
   };

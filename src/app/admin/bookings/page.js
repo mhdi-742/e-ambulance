@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import Navbar from '@/components/layout/Navbar';
 import StatusBadge from '@/components/ui/StatusBadge';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
@@ -12,7 +12,8 @@ export default function AdminBookingsPage() {
   const [filter, setFilter] = useState('all');
   const supabase = getSupabaseBrowserClient();
 
-  const fetchBookings = async () => {
+  // 12.4 FIX: Wrap fetchBookings in useCallback with filter dep
+  const fetchBookings = useCallback(async () => {
     let query = supabase
       .from('bookings')
       .select(`
@@ -31,23 +32,26 @@ export default function AdminBookingsPage() {
     const { data } = await query;
     setBookings(data || []);
     setLoading(false);
-  };
+  }, [filter, supabase]);
 
   useEffect(() => {
     setLoading(true);
     fetchBookings();
-  }, [filter]);
+  }, [fetchBookings]);
 
   useEffect(() => {
+    // 5.1/5.7 FIX: Use clean channel subscription without Date.now() leak
     const channel = supabase
-      .channel(`admin-bookings:${Date.now()}`)
+      .channel('admin-bookings-live')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'bookings' }, () => {
         fetchBookings();
       })
       .subscribe();
 
-    return () => supabase.removeChannel(channel);
-  }, [supabase, filter]);
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [supabase, fetchBookings]);
 
   const filters = [
     { value: 'all', label: 'All Bookings' },
