@@ -12,14 +12,10 @@ export function useLocation(options = {}) {
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  const getLocation = useCallback(() => {
-    if (!navigator.geolocation) {
-      setError('Geolocation is not supported by your browser');
-      setLoading(false);
+  const requestPosition = useCallback(() => {
+    if (typeof navigator === 'undefined' || !navigator.geolocation) {
       return;
     }
-
-    setLoading(true);
 
     navigator.geolocation.getCurrentPosition(
       (position) => {
@@ -43,8 +39,26 @@ export function useLocation(options = {}) {
     );
   }, [enableHighAccuracy]);
 
+  const getLocation = useCallback(() => {
+    if (typeof navigator === 'undefined' || !navigator.geolocation) {
+      setError('Geolocation is not supported by your browser');
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    requestPosition();
+  }, [requestPosition]);
+
   useEffect(() => {
-    getLocation();
+    if (typeof navigator === 'undefined' || !navigator.geolocation) {
+      const id = setTimeout(() => {
+        setError('Geolocation is not supported by your browser');
+        setLoading(false);
+      }, 0);
+      return () => clearTimeout(id);
+    }
+
+    requestPosition();
 
     if (watch) {
       const watchId = navigator.geolocation.watchPosition(
@@ -68,7 +82,7 @@ export function useLocation(options = {}) {
 
       return () => navigator.geolocation.clearWatch(watchId);
     }
-  }, [getLocation, watch, enableHighAccuracy]);
+  }, [requestPosition, watch, enableHighAccuracy]);
 
   return { location, error, loading, refresh: getLocation };
 }

@@ -39,10 +39,9 @@ function MapBoundsUpdater({ points }) {
 function DirectionsPath({ origin, destination }) {
   const map = useMap();
   const routesLib = useMapsLibrary('routes');
-  const [directionsRenderer, setDirectionsRenderer] = useState(null);
 
   useEffect(() => {
-    if (!routesLib || !map) return;
+    if (!routesLib || !map || !origin || !destination) return;
 
     const renderer = new routesLib.DirectionsRenderer({
       map,
@@ -54,16 +53,6 @@ function DirectionsPath({ origin, destination }) {
       },
     });
 
-    setDirectionsRenderer(renderer);
-
-    return () => {
-      renderer.setMap(null);
-    };
-  }, [routesLib, map]);
-
-  useEffect(() => {
-    if (!routesLib || !directionsRenderer || !origin || !destination) return;
-
     const directionsService = new routesLib.DirectionsService();
 
     directionsService.route(
@@ -74,11 +63,15 @@ function DirectionsPath({ origin, destination }) {
       },
       (result, status) => {
         if (status === 'OK' && result) {
-          directionsRenderer.setDirections(result);
+          renderer.setDirections(result);
         }
       }
     );
-  }, [routesLib, directionsRenderer, origin, destination]);
+
+    return () => {
+      renderer.setMap(null);
+    };
+  }, [routesLib, map, origin, destination]);
 
   return null;
 }

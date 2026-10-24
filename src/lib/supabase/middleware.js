@@ -33,9 +33,11 @@ export async function updateSession(request) {
     data: { user },
   } = await supabase.auth.getUser();
 
+  const pathname = request.nextUrl.pathname;
+
   // Public routes that don't require auth
-  const publicPaths = ['/', '/auth/login', '/auth/register'];
-  const isPublicPath = publicPaths.includes(request.nextUrl.pathname);
+  const publicPaths = ['/', '/auth/login', '/auth/register', '/auth/reset-password'];
+  const isPublicPath = publicPaths.includes(pathname);
 
   // Redirect unauthenticated users to login (except public pages)
   if (!user && !isPublicPath) {
@@ -44,18 +46,30 @@ export async function updateSession(request) {
     return NextResponse.redirect(url);
   }
 
-  // 1.3 FIX: Role-based route protection for /admin/*
-  // Only users with role='admin' can access admin routes
-  if (user && request.nextUrl.pathname.startsWith('/admin')) {
+  // Role-based route protection for /admin/*, /driver/*, and /user/*
+  if (
+    user &&
+    (pathname.startsWith('/admin') ||
+      pathname.startsWith('/driver') ||
+      pathname.startsWith('/user'))
+  ) {
     const { data: profile } = await supabase
       .from('profiles')
       .select('role')
       .eq('id', user.id)
       .single();
 
-    if (!profile || profile.role !== 'admin') {
+    const role = profile?.role || 'user';
+    const homeByRole =
+      role === 'admin' ? '/admin' : role === 'driver' ? '/driver' : '/user';
+
+    if (
+      (pathname.startsWith('/admin') && role !== 'admin') ||
+      (pathname.startsWith('/driver') && role !== 'driver') ||
+      (pathname.startsWith('/user') && role !== 'user')
+    ) {
       const url = request.nextUrl.clone();
-      url.pathname = '/user';
+      url.pathname = homeByRole;
       return NextResponse.redirect(url);
     }
   }

@@ -171,9 +171,22 @@ CREATE POLICY "Drivers can view pending bookings"
   ON public.bookings FOR SELECT
   USING (status = 'pending');
 
+CREATE POLICY "Drivers can view assigned bookings"
+  ON public.bookings FOR SELECT
+  USING (
+    driver_id IN (
+      SELECT id FROM public.drivers WHERE profile_id = auth.uid()
+    )
+  );
+
 CREATE POLICY "Drivers can update bookings assigned to them"
   ON public.bookings FOR UPDATE
   USING (
+    driver_id IN (
+      SELECT id FROM public.drivers WHERE profile_id = auth.uid()
+    )
+  )
+  WITH CHECK (
     driver_id IN (
       SELECT id FROM public.drivers WHERE profile_id = auth.uid()
     )
@@ -181,7 +194,16 @@ CREATE POLICY "Drivers can update bookings assigned to them"
 
 CREATE POLICY "Drivers can accept pending bookings"
   ON public.bookings FOR UPDATE
-  USING (status = 'pending');
+  USING (status = 'pending')
+  WITH CHECK (
+    status IN ('pending', 'accepted')
+    AND (
+      driver_id IS NULL
+      OR driver_id IN (
+        SELECT id FROM public.drivers WHERE profile_id = auth.uid()
+      )
+    )
+  );
 
 CREATE POLICY "Admins can manage all bookings"
   ON public.bookings FOR ALL
