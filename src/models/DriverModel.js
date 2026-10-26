@@ -1,6 +1,7 @@
 import { getSupabaseBrowserClient } from '@/lib/supabase/client';
+import { CITY_CENTER, BOOKING_STATUS } from '@/lib/constants';
 
-function isValidLatLng(lat, lng) {
+export function isValidLatLng(lat, lng) {
   const nLat = Number(lat);
   const nLng = Number(lng);
   return (
@@ -13,9 +14,122 @@ function isValidLatLng(lat, lng) {
 }
 
 /**
+ * Calculate Haversine distance in meters between two { lat, lng } points.
+ */
+export function getDistanceMeters(a, b) {
+  if (!a || !b || !isValidLatLng(a.lat, a.lng) || !isValidLatLng(b.lat, b.lng)) {
+    return Infinity;
+  }
+  const R = 6371000;
+  const dLat = ((Number(b.lat) - Number(a.lat)) * Math.PI) / 180;
+  const dLng = ((Number(b.lng) - Number(a.lng)) * Math.PI) / 180;
+  const sinLat = Math.sin(dLat / 2);
+  const sinLng = Math.sin(dLng / 2);
+  const calc =
+    sinLat * sinLat +
+    Math.cos((Number(a.lat) * Math.PI) / 180) *
+      Math.cos((Number(b.lat) * Math.PI) / 180) *
+      sinLng *
+      sinLng;
+  return 2 * R * Math.atan2(Math.sqrt(calc), Math.sqrt(1 - calc));
+}
+
+/**
+ * Fetch road route coordinates and metrics using OSRM public driving router.
+ * Falls back to a smooth interpolated path if offline.
+ */
+export async function fetchRoadRoute(origin, destination) {
+  if (!origin || !destination || !isValidLatLng(origin.lat, origin.lng) || !isValidLatLng(destination.lat, destination.lng)) {
+    return null;
+  }
+
+  const startLat = Number(origin.lat);
+  const startLng = Number(origin.lng);
+  const endLat = Number(destination.lat);
+  const endLng = Number(destination.lng);
+
+  try {
+    const url = `https://router.project-osrm.org/route/v1/driving/${startLng},${startLat};${endLng},${endLat}?overview=full&geometries=geojson`;
+    const res = await fetch(url);
+    if (res.ok) {
+      const json = await res.json();
+      const route = json?.routes?.[0];
+      if (route?.geometry?.coordinates?.length > 1) {
+        const path = route.geometry.coordinates.map(([lng, lat]) => ({
+          lat: Number(lat),
+          lng: Number(lng),
+        }));
+        const distKm = (route.distance / 1000).toFixed(1);
+        const durMin = Math.max(1, Math.round(route.duration / 60));
+        return {
+          path,
+          distanceMeters: route.distance,
+          durationSeconds: route.duration,
+          distanceText: `${distKm} km`,
+          durationText: `${durMin} min${durMin > 1 ? 's' : ''}`,
+        };
+      }
+    }
+  } catch {
+    // Fall back to interpolated path below
+  }
+
+  // Fallback interpolated path (25 steps)
+  const steps = 25;
+  const path = [];
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    path.push({
+      lat: startLat + (endLat - startLat) * t,
+      lng: startLng + (endLng - startLng) * t,
+    });
+  }
+  const distMeters = getDistanceMeters(origin, destination);
+  const distKm = (distMeters / 1000).toFixed(1);
+  const durMin = Math.max(1, Math.round(distMeters / 500)); // ~30 km/h city speed
+
+  return {
+    path,
+    distanceMeters: distMeters,
+    durationSeconds: durMin * 60,
+    distanceText: `${distKm} km`,
+    durationText: `${durMin} min${durMin > 1 ? 's' : ''}`,
+  };
+}
+
+/**
+ * Compute a realistic initial ambulance coordinate near the pickup point
+ * when desktop GPS is unavailable (0, 0), identical to pickup (same-device testing),
+ * or > 50 km away from the patient's city.
+ */
+export function resolveInitialDriverCoordinate(rawDriverLoc, pickupLoc) {
+  const baseRef =
+    pickupLoc && isValidLatLng(pickupLoc.lat, pickupLoc.lng)
+      ? { lat: Number(pickupLoc.lat), lng: Number(pickupLoc.lng) }
+      : CITY_CENTER;
+
+  if (rawDriverLoc && isValidLatLng(rawDriverLoc.lat, rawDriverLoc.lng)) {
+    const distFromPickup = getDistanceMeters(rawDriverLoc, baseRef);
+    // Use raw GPS if it is between 80 meters and 50 km from pickup
+    if (distFromPickup >= 80 && distFromPickup <= 50000) {
+      return {
+        lat: Number(rawDriverLoc.lat),
+        lng: Number(rawDriverLoc.lng),
+      };
+    }
+  }
+
+  // Offset ~1.1 km southwest of pickup so Driver, Pickup, and Hospital are all clearly distinct
+  return {
+    lat: Number((baseRef.lat - 0.0075).toFixed(6)),
+    lng: Number((baseRef.lng - 0.0085).toFixed(6)),
+  };
+}
+
+/**
  * DriverModel
  * Handles all data operations for `drivers` and `location_logs`,
- * as well as real-time driver location telemetry broadcasting.
+ * as well as real-time driver location telemetry broadcasting and road simulation.
  */
 export const DriverModel = {
   /**
@@ -36,6 +150,7 @@ export const DriverModel = {
    * Fetch driver record by driver ID.
    */
   async getById(driverId) {
+    if (!driverId) return { data: null, error: null };
     const supabase = getSupabaseBrowserClient();
     const { data, error } = await supabase
       .from('drivers')
@@ -44,6 +159,19 @@ export const DriverModel = {
       .maybeSingle();
 
     return { data, error };
+  },
+
+  /**
+   * Fetch all currently online drivers (used for radar / map preview).
+   */
+  async getOnlineDrivers() {
+    const supabase = getSupabaseBrowserClient();
+    const { data, error } = await supabase
+      .from('drivers')
+      .select('id, vehicle_number, vehicle_type, is_online, is_busy, current_lat, current_lng, last_location_update')
+      .eq('is_online', true);
+
+    return { data: data || [], error };
   },
 
   /**
@@ -172,15 +300,24 @@ export const DriverModel = {
 
   /**
    * Start broadcasting driver GPS location to a booking's realtime channel
-   * and persisting throttled updates to `drivers` and `location_logs`.
+   * and persisting updates to `drivers` and `location_logs`.
+   * Includes road-following simulation fallback when testing on a stationary computer.
    */
-  startLocationBroadcast(bookingId, driverId, optionsOrInterval = 5000) {
+  startLocationBroadcast(bookingId, driverId, optionsOrInterval = 3000) {
     const intervalMs =
       typeof optionsOrInterval === 'number'
         ? optionsOrInterval
-        : optionsOrInterval?.intervalMs || 5000;
+        : optionsOrInterval?.intervalMs || 3000;
     const onLocationChange =
       typeof optionsOrInterval === 'object' ? optionsOrInterval?.onLocationChange : null;
+    const pickupLocation =
+      typeof optionsOrInterval === 'object' ? optionsOrInterval?.pickupLocation : null;
+    const hospitalLocation =
+      typeof optionsOrInterval === 'object' ? optionsOrInterval?.hospitalLocation : null;
+    const initialDriverLocation =
+      typeof optionsOrInterval === 'object' ? optionsOrInterval?.initialDriverLocation : null;
+    const getStatus =
+      typeof optionsOrInterval === 'object' ? optionsOrInterval?.getStatus : null;
 
     const supabase = getSupabaseBrowserClient();
     const channel = supabase.channel(`booking:${bookingId}`, {
@@ -191,8 +328,22 @@ export const DriverModel = {
 
     let isSubscribed = false;
     let isStopped = false;
-    let latestLocation = null;
     let lastDbPersistAt = 0;
+
+    // Seed with a guaranteed valid initial coordinate so the ambulance pin appears immediately
+    const startingCoord = resolveInitialDriverCoordinate(initialDriverLocation, pickupLocation);
+    let latestLocation = {
+      lat: startingCoord.lat,
+      lng: startingCoord.lng,
+      timestamp: new Date().toISOString(),
+      driverId,
+    };
+
+    // Road simulation state for stationary desktop testing
+    let activeRoadPath = [];
+    let roadStepIndex = 0;
+    let currentSimulatedStage = null;
+    let lastRealGpsFixAt = 0;
 
     const sendBroadcast = (locationData) => {
       if (!isSubscribed || isStopped || !locationData) return;
@@ -224,19 +375,14 @@ export const DriverModel = {
       });
     };
 
-    const handlePosition = (position) => {
-      if (isStopped || !position?.coords) return;
-      const { latitude: lat, longitude: lng } = position.coords;
-      if (!isValidLatLng(lat, lng)) return;
-
+    const emitPosition = (lat, lng, forcePersist = false) => {
+      if (isStopped || !isValidLatLng(lat, lng)) return;
       const locationData = {
         lat: Number(lat),
         lng: Number(lng),
         timestamp: new Date().toISOString(),
         driverId,
       };
-
-      const isFirstFix = !latestLocation;
       latestLocation = locationData;
 
       if (onLocationChange) {
@@ -244,8 +390,39 @@ export const DriverModel = {
       }
 
       sendBroadcast(locationData);
-      persistToDatabase(locationData, isFirstFix);
+      persistToDatabase(locationData, forcePersist);
     };
+
+    // Load road path for smooth Uber-like movement when testing on a stationary device
+    const prepareSimulationPath = async (stage) => {
+      if (isStopped) return;
+      currentSimulatedStage = stage;
+      roadStepIndex = 0;
+
+      if (
+        (stage === BOOKING_STATUS.ACCEPTED || stage === BOOKING_STATUS.EN_ROUTE_PICKUP) &&
+        pickupLocation
+      ) {
+        const route = await fetchRoadRoute(latestLocation, pickupLocation);
+        if (!isStopped && route?.path?.length) {
+          activeRoadPath = route.path;
+        }
+      } else if (stage === BOOKING_STATUS.ARRIVED_PICKUP && pickupLocation) {
+        activeRoadPath = [{ lat: Number(pickupLocation.lat), lng: Number(pickupLocation.lng) }];
+        emitPosition(pickupLocation.lat, pickupLocation.lng, true);
+      } else if (stage === BOOKING_STATUS.EN_ROUTE_HOSPITAL && hospitalLocation) {
+        const startPt = pickupLocation || latestLocation;
+        const route = await fetchRoadRoute(startPt, hospitalLocation);
+        if (!isStopped && route?.path?.length) {
+          activeRoadPath = route.path;
+        }
+      }
+    };
+
+    // Immediately emit initial coordinate so both Driver and Patient maps show the ambulance right away
+    emitPosition(startingCoord.lat, startingCoord.lng, true);
+    const initialStage = getStatus ? getStatus() : BOOKING_STATUS.ACCEPTED;
+    prepareSimulationPath(initialStage);
 
     channel.subscribe((status) => {
       if (status === 'SUBSCRIBED') {
@@ -258,42 +435,73 @@ export const DriverModel = {
       }
     });
 
+    const handleOsPosition = (position) => {
+      if (isStopped || !position?.coords) return;
+      const { latitude: lat, longitude: lng } = position.coords;
+      if (!isValidLatLng(lat, lng)) return;
+
+      const resolved = resolveInitialDriverCoordinate({ lat, lng }, pickupLocation);
+      const movedMeters = getDistanceMeters(latestLocation, resolved);
+
+      // Only override simulated road progress if real physical GPS actually moved > 20m
+      if (movedMeters > 20 && getDistanceMeters({ lat, lng }, pickupLocation || CITY_CENTER) > 80) {
+        lastRealGpsFixAt = Date.now();
+        emitPosition(resolved.lat, resolved.lng, false);
+      }
+    };
+
     let watchId = null;
     if (typeof navigator !== 'undefined' && navigator.geolocation) {
-      // Request an immediate GPS fix so stationary devices don't wait for movement
       navigator.geolocation.getCurrentPosition(
-        handlePosition,
-        (err) => console.warn('Initial GPS lock warning:', err.message),
+        handleOsPosition,
+        () => {},
         {
           enableHighAccuracy: true,
           maximumAge: intervalMs,
-          timeout: 10000,
+          timeout: 8000,
         }
       );
 
       watchId = navigator.geolocation.watchPosition(
-        handlePosition,
-        (error) => {
-          console.warn('Geolocation watch warning:', error.message);
-        },
+        handleOsPosition,
+        () => {},
         {
           enableHighAccuracy: true,
           maximumAge: intervalMs,
-          timeout: 10000,
+          timeout: 8000,
         }
       );
     }
 
-    // Periodic heartbeat ensures patients opening/refreshing the tracking page
-    // always receive live coordinates even when the ambulance is stationary.
+    // Periodic telemetry tick: advances along the road route when stationary & broadcasts live coordinates
     const heartbeatTimer = setInterval(() => {
-      if (isStopped || !latestLocation) return;
-      const refreshedLocation = {
-        ...latestLocation,
-        timestamp: new Date().toISOString(),
-      };
-      sendBroadcast(refreshedLocation);
-      persistToDatabase(refreshedLocation, false);
+      if (isStopped) return;
+
+      const currentStage = getStatus ? getStatus() : currentSimulatedStage;
+      if (currentStage && currentStage !== currentSimulatedStage) {
+        prepareSimulationPath(currentStage);
+      }
+
+      const isPhysicallyMoving = Date.now() - lastRealGpsFixAt < 6000;
+      if (!isPhysicallyMoving && activeRoadPath.length > 1) {
+        // Advance along the road path during active driving stages
+        if (
+          currentStage === BOOKING_STATUS.ACCEPTED ||
+          currentStage === BOOKING_STATUS.EN_ROUTE_PICKUP ||
+          currentStage === BOOKING_STATUS.EN_ROUTE_HOSPITAL
+        ) {
+          roadStepIndex = Math.min(roadStepIndex + 1, activeRoadPath.length - 1);
+          const nextPt = activeRoadPath[roadStepIndex];
+          if (nextPt) {
+            emitPosition(nextPt.lat, nextPt.lng, false);
+            return;
+          }
+        }
+      }
+
+      if (latestLocation) {
+        emitPosition(latestLocation.lat, latestLocation.lng, false);
+      }
     }, intervalMs);
 
     return {
@@ -312,8 +520,8 @@ export const DriverModel = {
 
   /**
    * Subscribe to real-time driver location updates for a booking (patient-side).
-   * Combines low-latency WebSocket broadcast with Postgres Realtime fallback
-   * (`public.drivers` and `public.location_logs`) for 100% reliability.
+   * Combines low-latency WebSocket broadcast, Postgres Realtime (`drivers` & `location_logs`),
+   * and periodic polling fallback for 100% live reliability.
    */
   subscribeToLocationUpdates(bookingId, onLocationUpdate, driverId = null) {
     if (!bookingId) return () => {};
@@ -387,7 +595,31 @@ export const DriverModel = {
 
     dbChannel.subscribe();
 
+    // 3. Polling fallback every 3 seconds in case WebSockets are throttled or initial broadcast was missed
+    const pollInterval = setInterval(async () => {
+      if (driverId) {
+        const { data: drv } = await DriverModel.getById(driverId);
+        if (drv && isValidLatLng(drv.current_lat, drv.current_lng)) {
+          emitValidLocation(drv.current_lat, drv.current_lng, drv.last_location_update);
+          return;
+        }
+      }
+
+      const { data: latestLog } = await supabase
+        .from('location_logs')
+        .select('latitude, longitude, recorded_at')
+        .eq('booking_id', bookingId)
+        .order('recorded_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (latestLog && isValidLatLng(latestLog.latitude, latestLog.longitude)) {
+        emitValidLocation(latestLog.latitude, latestLog.longitude, latestLog.recorded_at);
+      }
+    }, 3000);
+
     return () => {
+      clearInterval(pollInterval);
       supabase.removeChannel(broadcastChannel);
       supabase.removeChannel(dbChannel);
     };

@@ -33,8 +33,15 @@ export function usePendingBookingsController() {
       }
     );
 
+    const pollInterval = setInterval(() => {
+      if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+        fetchPendingBookings();
+      }
+    }, 4000);
+
     return () => {
       unsubscribe();
+      clearInterval(pollInterval);
     };
   }, [fetchPendingBookings]);
 
@@ -148,9 +155,15 @@ export function useDriverDashboardController() {
   const [toast, setToast] = useState(null);
   const [accepting, setAccepting] = useState(null);
   const [updatingStatus, setUpdatingStatus] = useState(false);
-  const broadcastRef = useRef(null);
 
-  // Only run idle GPS watcher when online and NOT on an active trip (avoids duplicate watchers)
+  const broadcastRef = useRef(null);
+  const activeStatusRef = useRef(null);
+
+  useEffect(() => {
+    activeStatusRef.current = activeTrip?.status || null;
+  }, [activeTrip?.status]);
+
+  // Only run idle GPS watcher when online and NOT on an active trip
   const { currentLocation: idleLocation } = useDriverLocationController(
     driverData?.id,
     isOnline && !activeTrip
@@ -164,14 +177,39 @@ export function useDriverDashboardController() {
   }, []);
 
   const startBroadcastForTrip = useCallback(
-    (bookingId, driverId) => {
+    (trip, driverId) => {
+      if (!trip?.id || !driverId) return;
       stopBroadcast();
-      broadcastRef.current = DriverModel.startLocationBroadcast(bookingId, driverId, {
-        intervalMs: LOCATION_UPDATE_INTERVAL,
+      activeStatusRef.current = trip.status;
+
+      const tripPickup =
+        trip.pickup_lat != null && trip.pickup_lng != null
+          ? { lat: Number(trip.pickup_lat), lng: Number(trip.pickup_lng) }
+          : null;
+
+      const rawHospLat = trip.hospital?.latitude ?? trip.hospital?.lat;
+      const rawHospLng = trip.hospital?.longitude ?? trip.hospital?.lng;
+      const tripHospital =
+        rawHospLat != null && rawHospLng != null
+          ? { lat: Number(rawHospLat), lng: Number(rawHospLng) }
+          : null;
+
+      const initialDriverLoc =
+        idleLocation ||
+        (driverData?.current_lat && driverData?.current_lng
+          ? { lat: Number(driverData.current_lat), lng: Number(driverData.current_lng) }
+          : null);
+
+      broadcastRef.current = DriverModel.startLocationBroadcast(trip.id, driverId, {
+        intervalMs: 2500,
+        pickupLocation: tripPickup,
+        hospitalLocation: tripHospital,
+        initialDriverLocation: initialDriverLoc,
+        getStatus: () => activeStatusRef.current,
         onLocationChange: (loc) => setLiveTripLocation(loc),
       });
     },
-    [stopBroadcast]
+    [stopBroadcast, idleLocation, driverData?.current_lat, driverData?.current_lng]
   );
 
   useEffect(() => {
@@ -192,7 +230,7 @@ export function useDriverDashboardController() {
       if (data) {
         setActiveTrip(data);
         setIsOnline(true);
-        startBroadcastForTrip(data.id, driverData.id);
+        startBroadcastForTrip(data, driverData.id);
       }
     };
 
@@ -204,42 +242,55 @@ export function useDriverDashboardController() {
     };
   }, [driverData?.id, startBroadcastForTrip, stopBroadcast]);
 
-  // Subscribe to real-time updates on the active trip so patient/admin cancellations
-  // immediately clear the driver's screen and stop GPS broadcasting
+  // Subscribe to real-time updates on the active trip (plus 3s poll fallback)
+  // so patient/admin cancellations immediately clear the driver's screen
   useEffect(() => {
-    if (!activeTrip?.id) return;
+    if (!activeTrip?.id || !driverData?.id) return;
+
+    const handleRowUpdate = (updatedRow) => {
+      if (!updatedRow) return;
+
+      if (updatedRow.status === BOOKING_STATUS.CANCELLED) {
+        stopBroadcast();
+        setActiveTrip(null);
+        setLiveTripLocation(null);
+        refetchPending();
+        setToast({
+          message: 'The patient cancelled this dispatch request.',
+          type: 'info',
+        });
+        return;
+      }
+
+      if (updatedRow.status === BOOKING_STATUS.COMPLETED) {
+        stopBroadcast();
+        setActiveTrip(null);
+        setLiveTripLocation(null);
+        refetchPending();
+        return;
+      }
+
+      activeStatusRef.current = updatedRow.status;
+      setActiveTrip((prev) => (prev ? { ...prev, ...updatedRow } : prev));
+    };
 
     const unsubscribe = BookingModel.subscribeToBookingById(
       activeTrip.id,
-      (updatedRow) => {
-        if (!updatedRow) return;
-
-        if (updatedRow.status === BOOKING_STATUS.CANCELLED) {
-          stopBroadcast();
-          setActiveTrip(null);
-          refetchPending();
-          setToast({
-            message: 'The patient cancelled this dispatch request.',
-            type: 'info',
-          });
-          return;
-        }
-
-        if (updatedRow.status === BOOKING_STATUS.COMPLETED) {
-          stopBroadcast();
-          setActiveTrip(null);
-          refetchPending();
-          return;
-        }
-
-        setActiveTrip((prev) => (prev ? { ...prev, ...updatedRow } : prev));
-      }
+      handleRowUpdate
     );
+
+    const pollInterval = setInterval(async () => {
+      const { data } = await BookingModel.getDriverTripDetails(activeTrip.id);
+      if (data && data.status !== activeStatusRef.current) {
+        handleRowUpdate(data);
+      }
+    }, 3500);
 
     return () => {
       unsubscribe();
+      clearInterval(pollInterval);
     };
-  }, [activeTrip?.id, stopBroadcast, refetchPending]);
+  }, [activeTrip?.id, driverData?.id, stopBroadcast, refetchPending]);
 
   const toggleOnline = async () => {
     if (!driverData || activeTrip) return;
@@ -283,7 +334,7 @@ export function useDriverDashboardController() {
 
       if (trip) {
         setActiveTrip(trip);
-        startBroadcastForTrip(trip.id, driverData.id);
+        startBroadcastForTrip(trip, driverData.id);
       }
       refetchPending();
     }
@@ -304,21 +355,23 @@ export function useDriverDashboardController() {
 
     if (error) {
       setToast({ message: error.message, type: 'error' });
-      // Refresh active trip in case it was cancelled by the patient
       const { data: currentTrip } = await BookingModel.getActiveTripForDriver(driverData.id);
       if (!currentTrip) {
         stopBroadcast();
         setActiveTrip(null);
+        setLiveTripLocation(null);
         refetchPending();
       } else {
+        activeStatusRef.current = currentTrip.status;
         setActiveTrip(currentTrip);
       }
     } else {
+      activeStatusRef.current = newStatus;
       setToast({
         message:
           newStatus === BOOKING_STATUS.COMPLETED
             ? 'Trip completed! You are now available for new dispatches.'
-            : `Trip status updated`,
+            : 'Trip status updated',
         type: 'success',
       });
 
@@ -328,6 +381,7 @@ export function useDriverDashboardController() {
       ) {
         stopBroadcast();
         setActiveTrip(null);
+        setLiveTripLocation(null);
         refetchPending();
       } else {
         setActiveTrip((prev) => (prev ? { ...prev, status: newStatus } : null));

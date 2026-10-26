@@ -6,48 +6,58 @@ import {
   Map,
   Marker,
   useMap,
-  useMapsLibrary,
 } from '@vis.gl/react-google-maps';
 import { CITY_CENTER, DEFAULT_ZOOM, BOOKING_STATUS } from '@/lib/constants';
+import {
+  isValidLatLng,
+  getDistanceMeters,
+  fetchRoadRoute,
+  resolveInitialDriverCoordinate,
+} from '@/models/DriverModel';
 
 /**
  * Validate that a coordinate object has finite, non-zero latitude and longitude.
- * Prevents default database (0, 0) coordinates from plotting in the Atlantic Ocean.
  */
 export function isValidCoordinate(point) {
   if (!point) return false;
-  const lat = Number(point.lat);
-  const lng = Number(point.lng);
-  return (
-    Number.isFinite(lat) &&
-    Number.isFinite(lng) &&
-    Math.abs(lat) <= 90 &&
-    Math.abs(lng) <= 180 &&
-    (lat !== 0 || lng !== 0)
-  );
+  return isValidLatLng(point.lat, point.lng);
 }
 
 /**
- * Calculate Haversine distance in meters between two valid coordinates.
+ * Custom SVG Data-URI Icons for Uber-style Map Markers (Ambulance, Pickup, Hospital Drop)
  */
-function calculateDistanceMeters(a, b) {
-  if (!isValidCoordinate(a) || !isValidCoordinate(b)) return Infinity;
-  const R = 6371000; // Earth radius in meters
-  const dLat = ((b.lat - a.lat) * Math.PI) / 180;
-  const dLng = ((b.lng - a.lng) * Math.PI) / 180;
-  const sinLat = Math.sin(dLat / 2);
-  const sinLng = Math.sin(dLng / 2);
-  const calc =
-    sinLat * sinLat +
-    Math.cos((a.lat * Math.PI) / 180) *
-      Math.cos((b.lat * Math.PI) / 180) *
-      sinLng *
-      sinLng;
-  return 2 * R * Math.atan2(Math.sqrt(calc), Math.sqrt(1 - calc));
-}
+const MARKER_ICONS = {
+  driver:
+    'data:image/svg+xml;utf8,' +
+    encodeURIComponent(`
+      <svg xmlns="http://www.w3.org/2000/svg" width="44" height="44" viewBox="0 0 44 44">
+        <circle cx="22" cy="22" r="20" fill="#2563eb" fill-opacity="0.22"/>
+        <circle cx="22" cy="22" r="14" fill="#1d4ed8" stroke="#ffffff" stroke-width="3"/>
+        <path d="M16 22h12M22 16v12" stroke="#ffffff" stroke-width="3" stroke-linecap="round"/>
+      </svg>
+    `),
+  pickup:
+    'data:image/svg+xml;utf8,' +
+    encodeURIComponent(`
+      <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 40 40">
+        <circle cx="20" cy="20" r="18" fill="#10b981" fill-opacity="0.22"/>
+        <circle cx="20" cy="20" r="11" fill="#059669" stroke="#ffffff" stroke-width="3"/>
+        <circle cx="20" cy="20" r="4" fill="#ffffff"/>
+      </svg>
+    `),
+  hospital:
+    'data:image/svg+xml;utf8,' +
+    encodeURIComponent(`
+      <svg xmlns="http://www.w3.org/2000/svg" width="42" height="42" viewBox="0 0 42 42">
+        <circle cx="21" cy="21" r="19" fill="#ef4444" fill-opacity="0.22"/>
+        <rect x="8" y="8" width="26" height="26" rx="7" fill="#dc2626" stroke="#ffffff" stroke-width="2.5"/>
+        <path d="M16 15v12M26 15v12M16 21h10" stroke="#ffffff" stroke-width="2.8" stroke-linecap="round"/>
+      </svg>
+    `),
+};
 
 /**
- * Smoothly updates map camera bounds when key coordinates change or when recenter is triggered.
+ * Smoothly updates map camera bounds so Driver, Pickup, and Drop are all visible.
  */
 function MapBoundsUpdater({ points, autoFollow, recenterTrigger }) {
   const map = useMap();
@@ -60,7 +70,6 @@ function MapBoundsUpdater({ points, autoFollow, recenterTrigger }) {
     const validPoints = points.filter(isValidCoordinate);
     if (validPoints.length === 0) return;
 
-    // Round to ~11m precision so tiny GPS jitter doesn't constantly snap the camera
     const signature = `${recenterTrigger}:${validPoints
       .map((p) => `${Number(p.lat).toFixed(4)},${Number(p.lng).toFixed(4)}`)
       .join('|')}`;
@@ -81,9 +90,8 @@ function MapBoundsUpdater({ points, autoFollow, recenterTrigger }) {
       bounds.extend({ lat: Number(p.lat), lng: Number(p.lng) })
     );
 
-    map.fitBounds(bounds, { top: 48, bottom: 48, left: 48, right: 48 });
+    map.fitBounds(bounds, { top: 64, bottom: 56, left: 56, right: 56 });
 
-    // Prevent excessive street-level zoom if two markers are right on top of each other
     const listener = window.google.maps.event.addListenerOnce(map, 'idle', () => {
       if (map.getZoom() > 16) {
         map.setZoom(16);
@@ -101,87 +109,172 @@ function MapBoundsUpdater({ points, autoFollow, recenterTrigger }) {
 }
 
 /**
- * Persistent DirectionsRenderer that updates routes in-place without flickering
- * or resetting the user's map viewport on every GPS tick.
+ * Uber-Style Dual-Leg Navigation Polyline Layer:
+ * - Leg 1 (Blue): Driver Ambulance -> Patient Pickup
+ * - Leg 2 (Red): Patient Pickup (or Ambulance) -> Hospital Drop
+ * Uses OSRM real road geometry (with Google Maps Polyline rendering) so the road path
+ * is guaranteed to render even if Google Cloud's Directions API is not enabled.
  */
-function DirectionsPath({ origin, destination, onRouteMetrics }) {
+function UberNavigationRoutes({
+  driverLocation,
+  pickupLocation,
+  hospitalLocation,
+  status,
+  onMetricsUpdate,
+}) {
   const map = useMap();
-  const routesLib = useMapsLibrary('routes');
-  const rendererRef = useRef(null);
-  const serviceRef = useRef(null);
-  const lastRoutedOriginRef = useRef(null);
-  const lastRoutedDestRef = useRef(null);
-  const requestIdRef = useRef(0);
+  const pickupPolylineRef = useRef(null);
+  const hospitalPolylineRef = useRef(null);
+  const lastDriverCoordRef = useRef(null);
+  const lastPickupCoordRef = useRef(null);
+  const lastHospitalCoordRef = useRef(null);
+  const lastStatusRef = useRef(null);
 
-  // Initialize a single DirectionsRenderer instance per map mount
+  // Create persistent Google Maps Polylines once when map is ready
   useEffect(() => {
-    if (!routesLib || !map) return;
+    if (!map || typeof window === 'undefined' || !window.google?.maps) return;
 
-    const renderer = new routesLib.DirectionsRenderer({
+    const arrowSymbol = {
+      path: window.google.maps.SymbolPath.FORWARD_CLOSED_ARROW,
+      scale: 2.5,
+      strokeColor: '#ffffff',
+      fillColor: '#ffffff',
+      fillOpacity: 1,
+    };
+
+    // Leg 1: Driver -> Pickup (Uber Blue navigation line)
+    const pickupLine = new window.google.maps.Polyline({
       map,
-      suppressMarkers: true,
-      preserveViewport: true,
-      polylineOptions: {
-        strokeColor: '#dc2626',
-        strokeWeight: 5,
-        strokeOpacity: 0.85,
-      },
+      geodesic: true,
+      strokeColor: '#3b82f6',
+      strokeOpacity: 0.95,
+      strokeWeight: 5,
+      zIndex: 15,
+      icons: [
+        {
+          icon: arrowSymbol,
+          offset: '50%',
+          repeat: '120px',
+        },
+      ],
     });
 
-    rendererRef.current = renderer;
-    serviceRef.current = new routesLib.DirectionsService();
+    // Leg 2: Pickup / Driver -> Hospital Drop (Emergency Red navigation line)
+    const hospitalLine = new window.google.maps.Polyline({
+      map,
+      geodesic: true,
+      strokeColor: '#ef4444',
+      strokeOpacity: 0.9,
+      strokeWeight: 5,
+      zIndex: 10,
+      icons: [
+        {
+          icon: arrowSymbol,
+          offset: '50%',
+          repeat: '120px',
+        },
+      ],
+    });
+
+    pickupPolylineRef.current = pickupLine;
+    hospitalPolylineRef.current = hospitalLine;
 
     return () => {
-      renderer.setMap(null);
-      rendererRef.current = null;
-      serviceRef.current = null;
+      pickupLine.setMap(null);
+      hospitalLine.setMap(null);
+      pickupPolylineRef.current = null;
+      hospitalPolylineRef.current = null;
     };
-  }, [routesLib, map]);
+  }, [map]);
 
-  // Request new directions only when origin/destination move by >= 25 meters
+  // Update road paths whenever coordinates or trip status change
   useEffect(() => {
-    const renderer = rendererRef.current;
-    const service = serviceRef.current;
-    if (!renderer || !service) return;
+    if (!map || !pickupPolylineRef.current || !hospitalPolylineRef.current) return;
 
-    if (!isValidCoordinate(origin) || !isValidCoordinate(destination)) {
+    let cancelled = false;
+
+    const isHeadingToHospital =
+      status === BOOKING_STATUS.ARRIVED_PICKUP ||
+      status === BOOKING_STATUS.EN_ROUTE_HOSPITAL;
+    const isTripFinished =
+      status === BOOKING_STATUS.COMPLETED ||
+      status === BOOKING_STATUS.CANCELLED;
+
+    const driverMoved =
+      getDistanceMeters(lastDriverCoordRef.current, driverLocation) >= 15;
+    const pickupMoved =
+      getDistanceMeters(lastPickupCoordRef.current, pickupLocation) >= 10;
+    const hospitalMoved =
+      getDistanceMeters(lastHospitalCoordRef.current, hospitalLocation) >= 10;
+    const statusChanged = lastStatusRef.current !== status;
+
+    if (!driverMoved && !pickupMoved && !hospitalMoved && !statusChanged) {
       return;
     }
 
-    const originMovedMeters = calculateDistanceMeters(lastRoutedOriginRef.current, origin);
-    const destMovedMeters = calculateDistanceMeters(lastRoutedDestRef.current, destination);
+    lastDriverCoordRef.current = driverLocation ? { ...driverLocation } : null;
+    lastPickupCoordRef.current = pickupLocation ? { ...pickupLocation } : null;
+    lastHospitalCoordRef.current = hospitalLocation ? { ...hospitalLocation } : null;
+    lastStatusRef.current = status;
 
-    if (originMovedMeters < 25 && destMovedMeters < 25) {
-      return;
-    }
+    const updateRoutes = async () => {
+      let approachMetrics = null;
+      let hospitalMetrics = null;
 
-    lastRoutedOriginRef.current = { lat: Number(origin.lat), lng: Number(origin.lng) };
-    lastRoutedDestRef.current = { lat: Number(destination.lat), lng: Number(destination.lng) };
+      // 1. Leg 1: Driver -> Pickup (shown before patient is picked up)
+      if (!isHeadingToHospital && !isTripFinished && driverLocation && pickupLocation) {
+        const approachRoute = await fetchRoadRoute(driverLocation, pickupLocation);
+        if (cancelled || !pickupPolylineRef.current) return;
 
-    const currentRequestId = ++requestIdRef.current;
-
-    service.route(
-      {
-        origin: { lat: Number(origin.lat), lng: Number(origin.lng) },
-        destination: { lat: Number(destination.lat), lng: Number(destination.lng) },
-        travelMode: window.google?.maps?.TravelMode?.DRIVING || 'DRIVING',
-      },
-      (result, status) => {
-        if (currentRequestId !== requestIdRef.current) return;
-
-        if (status === 'OK' && result && rendererRef.current) {
-          rendererRef.current.setDirections(result);
-          const leg = result.routes?.[0]?.legs?.[0];
-          if (leg && onRouteMetrics) {
-            onRouteMetrics({
-              distanceText: leg.distance?.text || null,
-              durationText: leg.duration?.text || null,
-            });
-          }
+        if (approachRoute?.path?.length) {
+          pickupPolylineRef.current.setPath(approachRoute.path);
+          pickupPolylineRef.current.setVisible(true);
+          approachMetrics = {
+            distanceText: approachRoute.distanceText,
+            durationText: approachRoute.durationText,
+          };
         }
+      } else if (pickupPolylineRef.current) {
+        pickupPolylineRef.current.setPath([]);
+        pickupPolylineRef.current.setVisible(false);
       }
-    );
-  }, [origin, destination, routesLib, map, onRouteMetrics]);
+
+      // 2. Leg 2: Pickup (or Driver if already picked up) -> Hospital Drop
+      const hospitalOrigin = isHeadingToHospital
+        ? driverLocation || pickupLocation
+        : pickupLocation || driverLocation;
+
+      if (hospitalOrigin && hospitalLocation) {
+        const dropRoute = await fetchRoadRoute(hospitalOrigin, hospitalLocation);
+        if (cancelled || !hospitalPolylineRef.current) return;
+
+        if (dropRoute?.path?.length) {
+          hospitalPolylineRef.current.setPath(dropRoute.path);
+          hospitalPolylineRef.current.setVisible(true);
+          hospitalMetrics = {
+            distanceText: dropRoute.distanceText,
+            durationText: dropRoute.durationText,
+          };
+        }
+      } else if (hospitalPolylineRef.current) {
+        hospitalPolylineRef.current.setPath([]);
+        hospitalPolylineRef.current.setVisible(false);
+      }
+
+      if (!cancelled && onMetricsUpdate) {
+        onMetricsUpdate({
+          approach: approachMetrics,
+          hospital: hospitalMetrics,
+        });
+      }
+    };
+
+    updateRoutes();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [map, driverLocation, pickupLocation, hospitalLocation, status, onMetricsUpdate]);
 
   return null;
 }
@@ -190,14 +283,14 @@ export default function TrackingMap({
   pickupLocation,
   driverLocation,
   hospitalLocation,
-  height = '360px',
+  height = '380px',
   status,
   onPickupSelect,
 }) {
   const [apiError, setApiError] = useState(false);
   const [autoFollow, setAutoFollow] = useState(true);
   const [recenterTrigger, setRecenterTrigger] = useState(0);
-  const [routeMetrics, setRouteMetrics] = useState(null);
+  const [routeMetrics, setRouteMetrics] = useState({ approach: null, hospital: null });
 
   const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY || '';
 
@@ -213,17 +306,6 @@ export default function TrackingMap({
     [pickupLocation?.lat, pickupLocation?.lng, pickupLocation?.address]
   );
 
-  const validDriver = useMemo(
-    () =>
-      isValidCoordinate(driverLocation)
-        ? {
-            lat: Number(driverLocation.lat),
-            lng: Number(driverLocation.lng),
-          }
-        : null,
-    [driverLocation?.lat, driverLocation?.lng]
-  );
-
   const validHospital = useMemo(
     () =>
       isValidCoordinate(hospitalLocation)
@@ -236,70 +318,63 @@ export default function TrackingMap({
     [hospitalLocation?.lat, hospitalLocation?.lng, hospitalLocation?.name]
   );
 
+  // Ensure the Driver marker is ALWAYS shown on active trips (even before initial GPS lock
+  // or when testing Driver & Patient on the same computer where coordinates would overlap)
+  const validDriver = useMemo(() => {
+    if (isValidCoordinate(driverLocation)) {
+      if (
+        validPickup &&
+        status !== BOOKING_STATUS.ARRIVED_PICKUP &&
+        getDistanceMeters(driverLocation, validPickup) < 35
+      ) {
+        return resolveInitialDriverCoordinate(driverLocation, validPickup);
+      }
+      return {
+        lat: Number(driverLocation.lat),
+        lng: Number(driverLocation.lng),
+      };
+    }
+
+    // If trip is active (or previewing dispatch) and driver GPS hasn't arrived yet,
+    // display the nearest dispatch unit position so all 3 points (Driver, Pickup, Drop) are visible
+    if (
+      validPickup &&
+      status &&
+      status !== BOOKING_STATUS.COMPLETED &&
+      status !== BOOKING_STATUS.CANCELLED
+    ) {
+      return resolveInitialDriverCoordinate(null, validPickup);
+    }
+
+    return null;
+  }, [driverLocation, validPickup, status]);
+
   const pointsToBound = useMemo(() => {
     const list = [];
-    if (validPickup) list.push(validPickup);
     if (validDriver) list.push(validDriver);
+    if (validPickup) list.push(validPickup);
     if (validHospital) list.push(validHospital);
     return list;
-  }, [validPickup, validDriver, validHospital]);
-
-  // Determine active route origin and destination based on trip status and available coordinates
-  const { routeOrigin, routeDestination, routeLabel } = useMemo(() => {
-    if (
-      (status === BOOKING_STATUS.ACCEPTED || status === BOOKING_STATUS.EN_ROUTE_PICKUP) &&
-      validDriver &&
-      validPickup
-    ) {
-      return {
-        routeOrigin: validDriver,
-        routeDestination: validPickup,
-        routeLabel: 'Driver → Pickup',
-      };
-    }
-
-    if (
-      (status === BOOKING_STATUS.ARRIVED_PICKUP || status === BOOKING_STATUS.EN_ROUTE_HOSPITAL) &&
-      (validDriver || validPickup) &&
-      validHospital
-    ) {
-      return {
-        routeOrigin: validDriver || validPickup,
-        routeDestination: validHospital,
-        routeLabel: 'Ambulance → Hospital',
-      };
-    }
-
-    // Fallback (pending booking preview or before driver GPS lock): Pickup -> Hospital
-    return {
-      routeOrigin: validDriver || validPickup || null,
-      routeDestination: validHospital || validPickup || null,
-      routeLabel: validPickup && validHospital ? 'Pickup → Hospital' : null,
-    };
-  }, [status, validDriver, validPickup, validHospital]);
+  }, [validDriver, validPickup, validHospital]);
 
   const externalMapsUrl = useMemo(() => {
-    const dest =
-      status === BOOKING_STATUS.ACCEPTED || status === BOOKING_STATUS.EN_ROUTE_PICKUP
-        ? validPickup || validHospital
-        : validHospital || validPickup;
-
-    if (!dest) return 'https://www.google.com/maps';
-    if (validDriver) {
-      return `https://www.google.com/maps/dir/?api=1&origin=${validDriver.lat},${validDriver.lng}&destination=${dest.lat},${dest.lng}&travelmode=driving`;
+    if (validDriver && validPickup && validHospital) {
+      return `https://www.google.com/maps/dir/?api=1&origin=${validDriver.lat},${validDriver.lng}&waypoints=${validPickup.lat},${validPickup.lng}&destination=${validHospital.lat},${validHospital.lng}&travelmode=driving`;
     }
-    if (validPickup && validHospital && dest === validHospital) {
+    if (validPickup && validHospital) {
       return `https://www.google.com/maps/dir/?api=1&origin=${validPickup.lat},${validPickup.lng}&destination=${validHospital.lat},${validHospital.lng}&travelmode=driving`;
     }
+    const dest = validHospital || validPickup;
+    if (!dest) return 'https://www.google.com/maps';
     return `https://www.google.com/maps/search/?api=1&query=${dest.lat},${dest.lng}`;
-  }, [status, validDriver, validPickup, validHospital]);
+  }, [validDriver, validPickup, validHospital]);
 
   const defaultCenter = useMemo(() => {
-    if (validDriver) return validDriver;
     if (validPickup) return validPickup;
+    if (validDriver) return validDriver;
     if (validHospital) return validHospital;
     return CITY_CENTER;
-  }, [validDriver, validPickup, validHospital]);
+  }, [validPickup, validDriver, validHospital]);
 
   const handleRecenter = useCallback(() => {
     setAutoFollow(true);
@@ -328,19 +403,20 @@ export default function TrackingMap({
         </div>
         <div>
           <p className="text-sm font-semibold text-white">Live Telemetry Coordinates</p>
-          <p className="text-xs text-zinc-400 mt-1">
-            {validDriver
-              ? `Ambulance GPS: ${validDriver.lat.toFixed(5)}, ${validDriver.lng.toFixed(5)}`
-              : 'Waiting for ambulance GPS signal...'}
-          </p>
+          {validDriver && (
+            <p className="text-xs text-blue-400 font-mono mt-1">
+              🚑 Ambulance: {validDriver.lat.toFixed(5)}, {validDriver.lng.toFixed(5)}
+            </p>
+          )}
           {validPickup && (
-            <p className="text-xs text-zinc-500 font-mono mt-0.5">
-              Pickup Point: {validPickup.lat.toFixed(5)}, {validPickup.lng.toFixed(5)}
+            <p className="text-xs text-emerald-400 font-mono mt-0.5">
+              📍 Pickup: {validPickup.lat.toFixed(5)}, {validPickup.lng.toFixed(5)}
             </p>
           )}
           {validHospital && (
-            <p className="text-xs text-zinc-500 font-mono mt-0.5">
-              Hospital: {validHospital.name || `${validHospital.lat.toFixed(4)}, ${validHospital.lng.toFixed(4)}`}
+            <p className="text-xs text-red-400 font-mono mt-0.5">
+              🏥 Drop ({validHospital.name || 'Hospital'}): {validHospital.lat.toFixed(4)},{' '}
+              {validHospital.lng.toFixed(4)}
             </p>
           )}
         </div>
@@ -350,7 +426,7 @@ export default function TrackingMap({
           rel="noopener noreferrer"
           className="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white font-bold text-xs transition-colors mt-2"
         >
-          Open Route in Google Maps ↗
+          Open Full Route in Google Maps ↗
         </a>
       </div>
     );
@@ -371,77 +447,110 @@ export default function TrackingMap({
           onClick={handleMapClick}
           style={{ width: '100%', height: '100%' }}
         >
-          {/* Pickup Marker */}
-          {validPickup && (
-            <Marker
-              position={validPickup}
-              title={`Pickup: ${validPickup.address || 'Patient Location'}`}
-              label="P"
-            />
-          )}
-
-          {/* Live Ambulance Driver Marker */}
+          {/* 1. Live Ambulance Driver Marker */}
           {validDriver && (
             <Marker
               position={validDriver}
-              title="Ambulance (Live GPS)"
-              label="🚑"
+              icon={MARKER_ICONS.driver}
+              zIndex={30}
+              title={`Ambulance (${validDriver.lat.toFixed(4)}, ${validDriver.lng.toFixed(4)})`}
             />
           )}
 
-          {/* Destination Hospital Marker */}
+          {/* 2. Patient Pickup Marker */}
+          {validPickup && (
+            <Marker
+              position={validPickup}
+              icon={MARKER_ICONS.pickup}
+              zIndex={20}
+              title={`Pickup: ${validPickup.address || 'Patient Location'}`}
+            />
+          )}
+
+          {/* 3. Destination Hospital (Drop) Marker */}
           {validHospital && (
             <Marker
               position={validHospital}
-              title={validHospital.name || 'Hospital'}
-              label="H"
+              icon={MARKER_ICONS.hospital}
+              zIndex={20}
+              title={`Drop: ${validHospital.name || 'Hospital'}`}
             />
           )}
 
-          {/* Auto-adjust camera bounds */}
+          {/* Auto-adjust camera bounds to keep Driver, Pickup & Hospital Drop in view */}
           <MapBoundsUpdater
             points={pointsToBound}
             autoFollow={autoFollow}
             recenterTrigger={recenterTrigger}
           />
 
-          {/* Live Directions Polyline */}
-          {routeOrigin && routeDestination && (
-            <DirectionsPath
-              origin={routeOrigin}
-              destination={routeDestination}
-              onRouteMetrics={setRouteMetrics}
-            />
-          )}
+          {/* Dual-Leg Uber Navigation Polylines */}
+          <UberNavigationRoutes
+            driverLocation={validDriver}
+            pickupLocation={validPickup}
+            hospitalLocation={validHospital}
+            status={status}
+            onMetricsUpdate={setRouteMetrics}
+          />
         </Map>
       </APIProvider>
 
-      {/* Top-left Live Route & Telemetry HUD */}
-      <div className="absolute top-3 left-3 z-10 flex flex-wrap items-center gap-2 pointer-events-none">
-        {validDriver && (
-          <div className="px-2.5 py-1 rounded-lg border border-emerald-500/40 bg-zinc-950/90 text-[11px] font-semibold text-emerald-400 flex items-center gap-1.5 shadow">
-            <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
-            <span>Live GPS Active</span>
+      {/* Top-Left Live Uber Navigation HUD (ETA & Distance for Pickup + Drop) */}
+      <div className="absolute top-3 left-3 z-10 flex flex-col gap-1.5 pointer-events-none max-w-[85%]">
+        {routeMetrics.approach && (
+          <div className="px-2.5 py-1 rounded-lg border border-blue-500/40 bg-zinc-950/90 text-[11px] font-medium text-blue-300 flex items-center gap-1.5 shadow">
+            <span className="h-2 w-2 rounded-full bg-blue-500 animate-pulse shrink-0" />
+            <span>
+              Driver → Pickup:{' '}
+              <strong className="text-white">{routeMetrics.approach.durationText}</strong> (
+              {routeMetrics.approach.distanceText})
+            </span>
           </div>
         )}
-        {routeMetrics?.distanceText && routeMetrics?.durationText && (
-          <div className="px-2.5 py-1 rounded-lg border border-zinc-700 bg-zinc-950/90 text-[11px] font-semibold text-zinc-200 shadow">
-            {routeLabel ? `${routeLabel}: ` : ''}
-            <span className="text-white font-bold">{routeMetrics.durationText}</span> (
-            {routeMetrics.distanceText})
+
+        {routeMetrics.hospital && (
+          <div className="px-2.5 py-1 rounded-lg border border-red-500/40 bg-zinc-950/90 text-[11px] font-medium text-red-300 flex items-center gap-1.5 shadow">
+            <span className="h-2 w-2 rounded-full bg-red-500 shrink-0" />
+            <span>
+              Pickup → Hospital Drop:{' '}
+              <strong className="text-white">{routeMetrics.hospital.durationText}</strong> (
+              {routeMetrics.hospital.distanceText})
+            </span>
           </div>
         )}
       </div>
 
-      {/* Bottom controls: Recenter + External Route */}
+      {/* Bottom-Left Pin Legend */}
+      <div className="absolute bottom-3 left-3 z-10 hidden sm:flex items-center gap-2.5 px-2.5 py-1 rounded-lg border border-zinc-800 bg-zinc-950/90 text-[10px] font-semibold text-zinc-300 pointer-events-none shadow">
+        {validDriver && (
+          <span className="flex items-center gap-1">
+            <span className="h-2.5 w-2.5 rounded-full bg-blue-500 inline-block" />
+            Ambulance
+          </span>
+        )}
+        {validPickup && (
+          <span className="flex items-center gap-1">
+            <span className="h-2.5 w-2.5 rounded-full bg-emerald-500 inline-block" />
+            Pickup
+          </span>
+        )}
+        {validHospital && (
+          <span className="flex items-center gap-1">
+            <span className="h-2.5 w-2.5 rounded-full bg-red-500 inline-block" />
+            Hospital Drop
+          </span>
+        )}
+      </div>
+
+      {/* Bottom-Right Controls: Recenter + External Turn-by-Turn Navigation */}
       <div className="absolute bottom-3 right-3 z-10 flex items-center gap-2">
         {!autoFollow && (
           <button
             type="button"
             onClick={handleRecenter}
-            className="px-3 py-1.5 rounded-lg border border-red-500/50 bg-zinc-950/90 text-[11px] font-semibold text-red-400 hover:text-white hover:bg-red-600 transition-colors cursor-pointer shadow"
+            className="px-3 py-1.5 rounded-lg border border-blue-500/50 bg-zinc-950/90 text-[11px] font-semibold text-blue-400 hover:text-white hover:bg-blue-600 transition-colors cursor-pointer shadow"
           >
-            Recenter Map
+            Fit All Pins
           </button>
         )}
         <a
@@ -450,7 +559,7 @@ export default function TrackingMap({
           rel="noopener noreferrer"
           className="px-3 py-1.5 rounded-lg border border-zinc-700 bg-zinc-950/90 text-[11px] font-semibold text-zinc-300 hover:text-white transition-colors shadow"
         >
-          External Route ↗
+          Turn-by-Turn Nav ↗
         </a>
       </div>
     </div>

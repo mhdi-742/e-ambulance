@@ -55,8 +55,16 @@ export function useBookingController(bookingId) {
       fetchBooking({ silent: true });
     });
 
+    // Polling fallback every 3s ensures immediate updates even if WebSockets reconnect
+    const pollInterval = setInterval(() => {
+      if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+        fetchBooking({ silent: true });
+      }
+    }, 3000);
+
     return () => {
       unsubscribe();
+      clearInterval(pollInterval);
     };
   }, [bookingId, fetchBooking]);
 

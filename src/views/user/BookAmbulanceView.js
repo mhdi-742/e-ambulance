@@ -253,8 +253,9 @@ export default function BookAmbulanceView({
                         }
                       : null
                   }
+                  status="pending"
                   onPickupSelect={handlePickupSelect}
-                  height="280px"
+                  height="300px"
                 />
               </div>
             </div>
