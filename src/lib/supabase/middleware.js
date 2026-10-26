@@ -36,7 +36,8 @@ export async function updateSession(request) {
   const pathname = request.nextUrl.pathname;
 
   // Public routes that don't require auth
-  const publicPaths = ['/', '/auth/login', '/auth/register', '/auth/reset-password'];
+  const authPaths = ['/auth/login', '/auth/register'];
+  const publicPaths = ['/', ...authPaths, '/auth/reset-password'];
   const isPublicPath = publicPaths.includes(pathname);
 
   // Redirect unauthenticated users to login (except public pages)
@@ -46,10 +47,11 @@ export async function updateSession(request) {
     return NextResponse.redirect(url);
   }
 
-  // Role-based route protection for /admin/*, /driver/*, and /user/*
+  // Role-based route protection & auth-page redirect for logged-in users
   if (
     user &&
-    (pathname.startsWith('/admin') ||
+    (authPaths.includes(pathname) ||
+      pathname.startsWith('/admin') ||
       pathname.startsWith('/driver') ||
       pathname.startsWith('/user'))
   ) {
@@ -62,6 +64,15 @@ export async function updateSession(request) {
     const role = profile?.role || 'user';
     const homeByRole =
       role === 'admin' ? '/admin' : role === 'driver' ? '/driver' : '/user';
+
+    // If already logged in and visiting /auth/login or /auth/register (unless kicked), redirect to their portal
+    const wasKicked = request.nextUrl.searchParams.get('kicked') === '1';
+    if (authPaths.includes(pathname) && !wasKicked) {
+      const url = request.nextUrl.clone();
+      url.pathname = homeByRole;
+      url.search = '';
+      return NextResponse.redirect(url);
+    }
 
     if (
       (pathname.startsWith('/admin') && role !== 'admin') ||

@@ -1,6 +1,12 @@
+'use client';
+
 import Link from 'next/link';
+import { useSession } from '@/hooks/useSession';
 
 export default function HeroSection() {
+  const { user, profile, loading } = useSession();
+  const role = profile?.role || 'user';
+
   return (
     <section className="w-full py-16 md:py-24 border-b border-zinc-800 bg-zinc-950">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -23,28 +29,82 @@ export default function HeroSection() {
               Connect directly with on-call ambulances and nearest hospitals in minutes. Real-time GPS tracking and 24/7 availability across Uttar Dinajpur.
             </p>
 
-            {/* Action Buttons & Links */}
+            {/* Action Buttons & Links — Role-Aware when Logged In */}
             <div className="flex flex-wrap items-center gap-4 w-full sm:w-auto">
-              <Link
-                href="/user/book"
-                className="w-full sm:w-auto px-8 py-3.5 rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-center transition-colors"
-              >
-                Book Ambulance Now →
-              </Link>
+              {loading ? (
+                <>
+                  <div className="w-full sm:w-52 h-12 rounded-xl bg-zinc-900 border border-zinc-800 animate-pulse" />
+                  <div className="w-full sm:w-44 h-12 rounded-xl bg-zinc-900 border border-zinc-800 animate-pulse" />
+                </>
+              ) : user && role === 'driver' ? (
+                <>
+                  <Link
+                    href="/driver"
+                    className="w-full sm:w-auto px-8 py-3.5 rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-center transition-colors"
+                  >
+                    Go to Driver Console →
+                  </Link>
+                  <Link
+                    href="/driver/history"
+                    className="w-full sm:w-auto px-6 py-3.5 rounded-xl border border-zinc-700 hover:bg-zinc-900 text-zinc-300 font-medium text-center transition-colors text-sm"
+                  >
+                    View Trip History
+                  </Link>
+                </>
+              ) : user && role === 'admin' ? (
+                <>
+                  <Link
+                    href="/admin"
+                    className="w-full sm:w-auto px-8 py-3.5 rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-center transition-colors"
+                  >
+                    Open Admin Dashboard →
+                  </Link>
+                  <Link
+                    href="/admin/bookings"
+                    className="w-full sm:w-auto px-6 py-3.5 rounded-xl border border-zinc-700 hover:bg-zinc-900 text-zinc-300 font-medium text-center transition-colors text-sm"
+                  >
+                    Manage Live Bookings
+                  </Link>
+                </>
+              ) : user && role === 'user' ? (
+                <>
+                  <Link
+                    href="/user/book"
+                    className="w-full sm:w-auto px-8 py-3.5 rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-center transition-colors"
+                  >
+                    Book Ambulance Now →
+                  </Link>
+                  <Link
+                    href="/user"
+                    className="w-full sm:w-auto px-6 py-3.5 rounded-xl border border-zinc-700 hover:bg-zinc-900 text-zinc-300 font-semibold text-center transition-colors text-sm"
+                  >
+                    Go to Patient Dashboard →
+                  </Link>
+                </>
+              ) : (
+                <>
+                  <Link
+                    href="/user/book"
+                    className="w-full sm:w-auto px-8 py-3.5 rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-center transition-colors"
+                  >
+                    Book Ambulance Now →
+                  </Link>
 
-              <a
-                href="tel:108"
-                className="w-full sm:w-auto px-6 py-3.5 rounded-xl border border-red-600/40 hover:bg-red-600/10 text-red-400 font-semibold text-center transition-colors"
-              >
-                Call Hotline: 108
-              </a>
+                  <a
+                    href="tel:108"
+                    className="w-full sm:w-auto px-6 py-3.5 rounded-xl border border-red-600/40 hover:bg-red-600/10 text-red-400 font-semibold text-center transition-colors"
+                  >
+                    Call Hotline: 108
+                  </a>
 
-              <Link
-                href="/auth/register"
-                className="w-full sm:w-auto px-6 py-3.5 rounded-xl border border-zinc-700 hover:bg-zinc-900 text-zinc-300 font-medium text-center transition-colors text-sm"
-              >
-                Join as Ambulance Driver
-              </Link>
+                  <Link
+                    href="/auth/register"
+                    className="w-full sm:w-auto px-6 py-3.5 rounded-xl border border-zinc-700 hover:bg-zinc-900 text-zinc-300 font-medium text-center transition-colors text-sm"
+                  >
+                    Join as Ambulance Driver
+                  </Link>
+                </>
+              )}
             </div>
 
             {/* Trust Badges Skeleton */}
@@ -55,7 +115,7 @@ export default function HeroSection() {
             </div>
           </div>
 
-          {/* Right Column: Visual Skeleton Box (Width, Height, Alignment) */}
+          {/* Right Column: Visual Skeleton Box */}
           <div className="w-full flex justify-center lg:justify-end">
             <div className="w-full max-w-md h-[420px] rounded-2xl border border-zinc-800 bg-zinc-900 p-6 flex flex-col justify-between">
               {/* Card Header */}
@@ -82,10 +142,10 @@ export default function HeroSection() {
               <div className="pt-3 border-t border-zinc-800 flex items-center justify-between text-xs">
                 <span className="text-zinc-400">Nearest Unit: ~4 mins away</span>
                 <Link
-                  href="/user/book"
+                  href={!loading && user && role === 'driver' ? '/driver' : '/user/book'}
                   className="font-bold text-red-400 hover:text-red-300 underline"
                 >
-                  Request Dispatch →
+                  {!loading && user && role === 'driver' ? 'Open Driver Console →' : 'Request Dispatch →'}
                 </Link>
               </div>
             </div>

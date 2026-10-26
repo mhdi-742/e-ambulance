@@ -1,4 +1,5 @@
 import "./globals.css";
+import { SessionProvider } from "@/controllers/useAuthController";
 
 export const metadata = {
   title: "E-Ambulance | Emergency Dispatch Raiganj",
@@ -23,7 +24,7 @@ export default function RootLayout({ children }) {
   return (
     <html lang="en" className="dark bg-zinc-950 text-white">
       <body className="min-h-screen bg-zinc-950 antialiased selection:bg-red-500 selection:text-white">
-        {children}
+        <SessionProvider>{children}</SessionProvider>
       </body>
     </html>
   );
