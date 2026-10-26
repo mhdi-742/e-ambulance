@@ -1,11 +1,12 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { BookingModel } from '@/models/BookingModel';
 import { DriverModel } from '@/models/DriverModel';
 import { useSessionController } from './useAuthController';
 import { LOCATION_UPDATE_INTERVAL, BOOKING_STATUS } from '@/lib/constants';
+import { isValidCoordinate } from '@/components/map/TrackingMap';
 
 /**
  * Controller Hook: Manages pending booking requests feed and atomic driver acceptance.
@@ -46,7 +47,7 @@ export function usePendingBookingsController() {
 
 /**
  * Controller Hook: Periodically updates the driver's GPS coordinates in the database
- * every 5 seconds while the driver is online.
+ * every 5 seconds while the driver is online and idle (not on an active trip).
  */
 export function useDriverLocationController(driverId, isActive = false) {
   const [currentLocation, setCurrentLocation] = useState(null);
@@ -66,20 +67,36 @@ export function useDriverLocationController(driverId, isActive = false) {
   useEffect(() => {
     if (!isActive || !driverId) return;
 
-    if (!navigator.geolocation) {
+    if (typeof navigator === 'undefined' || !navigator.geolocation) {
       setError('Geolocation not supported');
       return;
     }
 
-    watchIdRef.current = navigator.geolocation.watchPosition(
-      (position) => {
-        const loc = {
-          lat: position.coords.latitude,
-          lng: position.coords.longitude,
-        };
-        setCurrentLocation(loc);
-        locationRef.current = loc;
+    const onPosition = (position) => {
+      const loc = {
+        lat: position.coords.latitude,
+        lng: position.coords.longitude,
+      };
+      if (!isValidCoordinate(loc)) return;
+      setCurrentLocation(loc);
+      locationRef.current = loc;
+    };
+
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        onPosition(pos);
+        updateDriverLocation(pos.coords.latitude, pos.coords.longitude);
       },
+      (err) => setError(err.message),
+      {
+        enableHighAccuracy: true,
+        timeout: 10000,
+        maximumAge: LOCATION_UPDATE_INTERVAL,
+      }
+    );
+
+    watchIdRef.current = navigator.geolocation.watchPosition(
+      onPosition,
       (err) => {
         setError(err.message);
       },
@@ -98,11 +115,13 @@ export function useDriverLocationController(driverId, isActive = false) {
     }, LOCATION_UPDATE_INTERVAL);
 
     return () => {
-      if (watchIdRef.current) {
+      if (watchIdRef.current !== null) {
         navigator.geolocation.clearWatch(watchIdRef.current);
+        watchIdRef.current = null;
       }
-      if (intervalRef.current) {
+      if (intervalRef.current !== null) {
         clearInterval(intervalRef.current);
+        intervalRef.current = null;
       }
     };
   }, [isActive, driverId, updateDriverLocation]);
@@ -115,7 +134,7 @@ export function useDriverLocationController(driverId, isActive = false) {
  */
 export function useDriverDashboardController() {
   const router = useRouter();
-  const { driverData, loading: authLoading } = useSessionController();
+  const { driverData, loading: authLoading, refetchProfile } = useSessionController();
   const {
     bookings: pendingBookings,
     loading: pendingLoading,
@@ -125,47 +144,118 @@ export function useDriverDashboardController() {
 
   const [isOnline, setIsOnline] = useState(false);
   const [activeTrip, setActiveTrip] = useState(null);
+  const [liveTripLocation, setLiveTripLocation] = useState(null);
   const [toast, setToast] = useState(null);
   const [accepting, setAccepting] = useState(null);
+  const [updatingStatus, setUpdatingStatus] = useState(false);
   const broadcastRef = useRef(null);
 
-  useDriverLocationController(driverData?.id, isOnline);
+  // Only run idle GPS watcher when online and NOT on an active trip (avoids duplicate watchers)
+  const { currentLocation: idleLocation } = useDriverLocationController(
+    driverData?.id,
+    isOnline && !activeTrip
+  );
+
+  const stopBroadcast = useCallback(() => {
+    if (broadcastRef.current) {
+      broadcastRef.current.stop();
+      broadcastRef.current = null;
+    }
+  }, []);
+
+  const startBroadcastForTrip = useCallback(
+    (bookingId, driverId) => {
+      stopBroadcast();
+      broadcastRef.current = DriverModel.startLocationBroadcast(bookingId, driverId, {
+        intervalMs: LOCATION_UPDATE_INTERVAL,
+        onLocationChange: (loc) => setLiveTripLocation(loc),
+      });
+    },
+    [stopBroadcast]
+  );
 
   useEffect(() => {
     if (driverData) {
-      setIsOnline(driverData.is_online);
+      setIsOnline(Boolean(driverData.is_online));
     }
   }, [driverData]);
 
+  // Load any existing active trip for this driver on mount
   useEffect(() => {
-    if (!driverData) return;
+    if (!driverData?.id) return;
+    let active = true;
 
     const fetchActiveTrip = async () => {
       const { data } = await BookingModel.getActiveTripForDriver(driverData.id);
+      if (!active) return;
+
       if (data) {
         setActiveTrip(data);
-        if (broadcastRef.current) broadcastRef.current.stop();
-        broadcastRef.current = DriverModel.startLocationBroadcast(data.id, driverData.id);
+        setIsOnline(true);
+        startBroadcastForTrip(data.id, driverData.id);
       }
     };
 
     fetchActiveTrip();
 
     return () => {
-      if (broadcastRef.current) {
-        broadcastRef.current.stop();
-        broadcastRef.current = null;
-      }
+      active = false;
+      stopBroadcast();
     };
-  }, [driverData]);
+  }, [driverData?.id, startBroadcastForTrip, stopBroadcast]);
+
+  // Subscribe to real-time updates on the active trip so patient/admin cancellations
+  // immediately clear the driver's screen and stop GPS broadcasting
+  useEffect(() => {
+    if (!activeTrip?.id) return;
+
+    const unsubscribe = BookingModel.subscribeToBookingById(
+      activeTrip.id,
+      (updatedRow) => {
+        if (!updatedRow) return;
+
+        if (updatedRow.status === BOOKING_STATUS.CANCELLED) {
+          stopBroadcast();
+          setActiveTrip(null);
+          refetchPending();
+          setToast({
+            message: 'The patient cancelled this dispatch request.',
+            type: 'info',
+          });
+          return;
+        }
+
+        if (updatedRow.status === BOOKING_STATUS.COMPLETED) {
+          stopBroadcast();
+          setActiveTrip(null);
+          refetchPending();
+          return;
+        }
+
+        setActiveTrip((prev) => (prev ? { ...prev, ...updatedRow } : prev));
+      }
+    );
+
+    return () => {
+      unsubscribe();
+    };
+  }, [activeTrip?.id, stopBroadcast, refetchPending]);
 
   const toggleOnline = async () => {
-    if (!driverData) return;
+    if (!driverData || activeTrip) return;
 
     const newStatus = !isOnline;
     setIsOnline(newStatus);
 
-    await DriverModel.setOnlineStatus(driverData.id, newStatus);
+    const { error } = await DriverModel.setOnlineStatus(driverData.id, newStatus);
+    if (error) {
+      setIsOnline(!newStatus);
+      setToast({
+        message: error.message || 'Failed to update online status.',
+        type: 'error',
+      });
+      return;
+    }
 
     setToast({
       message: newStatus ? 'You are now ONLINE' : 'You are now OFFLINE',
@@ -174,7 +264,7 @@ export function useDriverDashboardController() {
   };
 
   const handleAccept = async (bookingId) => {
-    if (!driverData) return;
+    if (!driverData || accepting) return;
     setAccepting(bookingId);
 
     const result = await acceptBooking(bookingId, driverData.id);
@@ -183,18 +273,17 @@ export function useDriverDashboardController() {
       setToast({ message: result.error, type: 'error' });
       refetchPending();
     } else {
-      setToast({ message: 'Booking accepted!', type: 'success' });
+      setToast({ message: 'Booking accepted! Starting route navigation.', type: 'success' });
       let trip = result.data;
 
-      if (!trip?.hospital) {
+      if (!trip?.hospital?.latitude) {
         const { data } = await BookingModel.getDriverTripDetails(bookingId);
         if (data) trip = data;
       }
 
       if (trip) {
         setActiveTrip(trip);
-        if (broadcastRef.current) broadcastRef.current.stop();
-        broadcastRef.current = DriverModel.startLocationBroadcast(trip.id, driverData.id);
+        startBroadcastForTrip(trip.id, driverData.id);
       }
       refetchPending();
     }
@@ -202,7 +291,8 @@ export function useDriverDashboardController() {
   };
 
   const updateTripStatus = async (newStatus) => {
-    if (!activeTrip) return;
+    if (!activeTrip || updatingStatus) return;
+    setUpdatingStatus(true);
 
     const { error } = await BookingModel.updateStatus(
       activeTrip.id,
@@ -210,25 +300,84 @@ export function useDriverDashboardController() {
       driverData?.id
     );
 
+    setUpdatingStatus(false);
+
     if (error) {
       setToast({ message: error.message, type: 'error' });
+      // Refresh active trip in case it was cancelled by the patient
+      const { data: currentTrip } = await BookingModel.getActiveTripForDriver(driverData.id);
+      if (!currentTrip) {
+        stopBroadcast();
+        setActiveTrip(null);
+        refetchPending();
+      } else {
+        setActiveTrip(currentTrip);
+      }
     } else {
-      setToast({ message: `Status updated to ${newStatus}`, type: 'success' });
+      setToast({
+        message:
+          newStatus === BOOKING_STATUS.COMPLETED
+            ? 'Trip completed! You are now available for new dispatches.'
+            : `Trip status updated`,
+        type: 'success',
+      });
 
       if (
         newStatus === BOOKING_STATUS.COMPLETED ||
         newStatus === BOOKING_STATUS.CANCELLED
       ) {
-        if (broadcastRef.current) {
-          broadcastRef.current.stop();
-          broadcastRef.current = null;
-        }
+        stopBroadcast();
         setActiveTrip(null);
+        refetchPending();
       } else {
-        setActiveTrip((prev) => ({ ...prev, status: newStatus }));
+        setActiveTrip((prev) => (prev ? { ...prev, status: newStatus } : null));
       }
     }
   };
+
+  const pickupLocation = useMemo(() => {
+    if (!activeTrip || activeTrip.pickup_lat == null || activeTrip.pickup_lng == null) {
+      return null;
+    }
+    const pt = {
+      lat: Number(activeTrip.pickup_lat),
+      lng: Number(activeTrip.pickup_lng),
+      address: activeTrip.pickup_address,
+    };
+    return isValidCoordinate(pt) ? pt : null;
+  }, [activeTrip]);
+
+  const hospitalLocation = useMemo(() => {
+    const rawLat = activeTrip?.hospital?.latitude ?? activeTrip?.hospital?.lat;
+    const rawLng = activeTrip?.hospital?.longitude ?? activeTrip?.hospital?.lng;
+    if (rawLat == null || rawLng == null) return null;
+    const pt = {
+      lat: Number(rawLat),
+      lng: Number(rawLng),
+      name: activeTrip?.hospital?.name,
+    };
+    return isValidCoordinate(pt) ? pt : null;
+  }, [activeTrip]);
+
+  const activeDriverLocation = useMemo(() => {
+    if (liveTripLocation && isValidCoordinate(liveTripLocation)) {
+      return liveTripLocation;
+    }
+    if (idleLocation && isValidCoordinate(idleLocation)) {
+      return idleLocation;
+    }
+    if (
+      driverData?.current_lat != null &&
+      driverData?.current_lng != null &&
+      isValidCoordinate({ lat: driverData.current_lat, lng: driverData.current_lng })
+    ) {
+      return {
+        lat: Number(driverData.current_lat),
+        lng: Number(driverData.current_lng),
+      };
+    }
+    return null;
+  }, [liveTripLocation, idleLocation, driverData?.current_lat, driverData?.current_lng]);
 
   const goToRegister = () => router.push('/auth/register');
   const nextAction = activeTrip ? BookingModel.getNextDriverAction(activeTrip.status) : null;
@@ -238,16 +387,21 @@ export function useDriverDashboardController() {
     authLoading,
     isOnline,
     activeTrip,
+    pickupLocation,
+    hospitalLocation,
+    activeDriverLocation,
     pendingBookings,
     pendingLoading,
     toast,
     setToast,
     accepting,
+    updatingStatus,
     nextAction,
     toggleOnline,
     handleAccept,
     updateTripStatus,
     goToRegister,
+    refetchProfile,
   };
 }
 
@@ -282,4 +436,3 @@ export function useDriverHistoryController() {
     cancelled,
   };
 }
-

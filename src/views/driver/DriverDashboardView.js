@@ -4,6 +4,7 @@ import Navbar from '@/components/layout/Navbar';
 import StatusBadge from '@/components/ui/StatusBadge';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import Toast from '@/components/ui/Toast';
+import TrackingMap from '@/components/map/TrackingMap';
 
 /**
  * View: Driver Console Dashboard (`/driver`)
@@ -13,16 +14,21 @@ export default function DriverDashboardView({
   authLoading,
   isOnline,
   activeTrip,
+  pickupLocation,
+  hospitalLocation,
+  activeDriverLocation,
   pendingBookings,
   pendingLoading,
   toast,
   setToast,
   accepting,
+  updatingStatus,
   nextAction,
   toggleOnline,
   handleAccept,
   updateTripStatus,
   goToRegister,
+  refetchProfile,
 }) {
   if (authLoading) {
     return (
@@ -38,14 +44,24 @@ export default function DriverDashboardView({
         <div className="text-center max-w-md p-8 rounded-xl border border-zinc-800 bg-zinc-900">
           <h2 className="text-xl font-bold mb-2">Driver Profile Not Found</h2>
           <p className="text-sm text-zinc-400 mb-6">
-            Please register as a driver or log in with driver credentials.
+            Please ensure the latest database migration has been applied, or retry loading your driver profile.
           </p>
-          <button
-            onClick={goToRegister}
-            className="px-6 py-2.5 rounded-lg bg-red-600 text-white font-bold text-sm cursor-pointer"
-          >
-            Register as Driver
-          </button>
+          <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
+            {refetchProfile && (
+              <button
+                onClick={refetchProfile}
+                className="px-6 py-2.5 rounded-lg bg-red-600 hover:bg-red-500 text-white font-bold text-sm cursor-pointer"
+              >
+                Retry Loading Profile
+              </button>
+            )}
+            <button
+              onClick={goToRegister}
+              className="px-6 py-2.5 rounded-lg border border-zinc-700 hover:border-zinc-500 text-zinc-300 font-semibold text-sm cursor-pointer"
+            >
+              Register as Driver
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -93,8 +109,19 @@ export default function DriverDashboardView({
               <StatusBadge status={activeTrip.status} />
             </div>
 
+            {/* Live Driver Navigation Map */}
+            <div className="mb-5">
+              <TrackingMap
+                pickupLocation={pickupLocation}
+                driverLocation={activeDriverLocation}
+                hospitalLocation={hospitalLocation}
+                status={activeTrip.status}
+                height="320px"
+              />
+            </div>
+
             <div className="space-y-4 mb-6">
-              <div className="p-4 rounded-xl border border-zinc-800 bg-zinc-950 flex items-center justify-between">
+              <div className="p-4 rounded-xl border border-zinc-800 bg-zinc-950 flex items-center justify-between flex-wrap gap-3">
                 <div>
                   <p className="font-semibold text-white">
                     {activeTrip.user?.full_name || 'Patient'}
@@ -125,9 +152,10 @@ export default function DriverDashboardView({
             {nextAction && (
               <button
                 onClick={() => updateTripStatus(nextAction.status)}
-                className="w-full py-3.5 rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-sm transition-colors cursor-pointer"
+                disabled={updatingStatus}
+                className="w-full py-3.5 rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-sm transition-colors cursor-pointer disabled:opacity-50"
               >
-                {nextAction.label} →
+                {updatingStatus ? 'Updating Trip Status...' : `${nextAction.label} →`}
               </button>
             )}
           </div>
@@ -178,7 +206,7 @@ export default function DriverDashboardView({
 
                     <button
                       onClick={() => handleAccept(booking.id)}
-                      disabled={accepting === booking.id}
+                      disabled={accepting !== null}
                       className="w-full py-2.5 rounded-lg bg-red-600 hover:bg-red-500 text-white font-bold text-xs transition-colors cursor-pointer disabled:opacity-50"
                     >
                       {accepting === booking.id ? 'Accepting...' : 'Accept Dispatch Request'}
@@ -209,4 +237,3 @@ export default function DriverDashboardView({
     </div>
   );
 }
-

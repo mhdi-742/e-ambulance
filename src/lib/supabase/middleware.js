@@ -61,7 +61,7 @@ export async function updateSession(request) {
       .eq('id', user.id)
       .single();
 
-    const role = profile?.role || 'user';
+    const role = profile?.role || user.user_metadata?.role || 'user';
     const homeByRole =
       role === 'admin' ? '/admin' : role === 'driver' ? '/driver' : '/user';
 

@@ -1,5 +1,17 @@
 import { getSupabaseBrowserClient } from '@/lib/supabase/client';
 
+function isValidLatLng(lat, lng) {
+  const nLat = Number(lat);
+  const nLng = Number(lng);
+  return (
+    Number.isFinite(nLat) &&
+    Number.isFinite(nLng) &&
+    Math.abs(nLat) <= 90 &&
+    Math.abs(nLng) <= 180 &&
+    (nLat !== 0 || nLng !== 0)
+  );
+}
+
 /**
  * DriverModel
  * Handles all data operations for `drivers` and `location_logs`,
@@ -21,20 +33,63 @@ export const DriverModel = {
   },
 
   /**
-   * Upsert a driver profile record upon registration.
+   * Fetch driver record by driver ID.
+   */
+  async getById(driverId) {
+    const supabase = getSupabaseBrowserClient();
+    const { data, error } = await supabase
+      .from('drivers')
+      .select('*')
+      .eq('id', driverId)
+      .maybeSingle();
+
+    return { data, error };
+  },
+
+  /**
+   * Upsert a driver profile record upon registration or self-healing login.
    */
   async upsertByProfileId({ profileId, vehicleNumber, vehicleType }) {
     const supabase = getSupabaseBrowserClient();
-    const { data, error } = await supabase.from('drivers').upsert(
-      {
-        profile_id: profileId,
-        vehicle_number: vehicleNumber || 'PENDING',
-        vehicle_type: vehicleType || 'basic',
-      },
-      { onConflict: 'profile_id' }
-    );
+    const { data, error } = await supabase
+      .from('drivers')
+      .upsert(
+        {
+          profile_id: profileId,
+          vehicle_number: vehicleNumber || 'PENDING',
+          vehicle_type: vehicleType || 'basic',
+        },
+        { onConflict: 'profile_id' }
+      )
+      .select('*')
+      .maybeSingle();
 
     return { data, error };
+  },
+
+  /**
+   * Fetch driver record by profile ID, auto-creating it if the user has role='driver'
+   * and the row is missing.
+   */
+  async ensureByProfile(authUser) {
+    if (!authUser?.id) return { data: null, error: null };
+
+    const { data: existing, error } = await DriverModel.getByProfileId(authUser.id);
+    if (existing) {
+      return { data: existing, error: null };
+    }
+
+    if (error) {
+      console.error('Failed to fetch driver record:', error.message);
+      return { data: null, error };
+    }
+
+    const meta = authUser.user_metadata || {};
+    return await DriverModel.upsertByProfileId({
+      profileId: authUser.id,
+      vehicleNumber: meta.vehicle_number || 'PENDING',
+      vehicleType: meta.vehicle_type === 'icu' ? 'icu' : 'basic',
+    });
   },
 
   /**
@@ -83,12 +138,13 @@ export const DriverModel = {
    * Update a driver's current GPS coordinates.
    */
   async updateCoordinates(driverId, lat, lng, timestamp = new Date().toISOString()) {
+    if (!driverId || !isValidLatLng(lat, lng)) return { error: null };
     const supabase = getSupabaseBrowserClient();
     const { error } = await supabase
       .from('drivers')
       .update({
-        current_lat: lat,
-        current_lng: lng,
+        current_lat: Number(lat),
+        current_lng: Number(lng),
         last_location_update: timestamp,
       })
       .eq('id', driverId);
@@ -100,12 +156,15 @@ export const DriverModel = {
    * Insert a trip location history record into `location_logs`.
    */
   async insertLocationLog({ bookingId, driverId, latitude, longitude }) {
+    if (!bookingId || !driverId || !isValidLatLng(latitude, longitude)) {
+      return { error: null };
+    }
     const supabase = getSupabaseBrowserClient();
     const { error } = await supabase.from('location_logs').insert({
       booking_id: bookingId,
       driver_id: driverId,
-      latitude,
-      longitude,
+      latitude: Number(latitude),
+      longitude: Number(longitude),
     });
 
     return { error };
@@ -113,61 +172,138 @@ export const DriverModel = {
 
   /**
    * Start broadcasting driver GPS location to a booking's realtime channel
-   * and persisting updates to `drivers` and `location_logs`.
+   * and persisting throttled updates to `drivers` and `location_logs`.
    */
-  startLocationBroadcast(bookingId, driverId, intervalMs = 5000) {
-    const supabase = getSupabaseBrowserClient();
-    const channel = supabase.channel(`booking:${bookingId}`);
+  startLocationBroadcast(bookingId, driverId, optionsOrInterval = 5000) {
+    const intervalMs =
+      typeof optionsOrInterval === 'number'
+        ? optionsOrInterval
+        : optionsOrInterval?.intervalMs || 5000;
+    const onLocationChange =
+      typeof optionsOrInterval === 'object' ? optionsOrInterval?.onLocationChange : null;
 
-    channel.subscribe((status) => {
-      if (status !== 'SUBSCRIBED') return;
+    const supabase = getSupabaseBrowserClient();
+    const channel = supabase.channel(`booking:${bookingId}`, {
+      config: {
+        broadcast: { self: true },
+      },
     });
 
-    const watchId = navigator.geolocation.watchPosition(
-      (position) => {
-        const locationData = {
-          lat: position.coords.latitude,
-          lng: position.coords.longitude,
-          timestamp: new Date().toISOString(),
-          driverId,
-        };
+    let isSubscribed = false;
+    let isStopped = false;
+    let latestLocation = null;
+    let lastDbPersistAt = 0;
 
-        // Broadcast via Realtime channel
-        channel.send({
-          type: 'broadcast',
-          event: 'location_update',
-          payload: locationData,
-        });
+    const sendBroadcast = (locationData) => {
+      if (!isSubscribed || isStopped || !locationData) return;
+      channel.send({
+        type: 'broadcast',
+        event: 'location_update',
+        payload: locationData,
+      });
+    };
 
-        // Update driver's current location in DB
-        DriverModel.updateCoordinates(
-          driverId,
-          locationData.lat,
-          locationData.lng,
-          locationData.timestamp
-        );
+    const persistToDatabase = (locationData, force = false) => {
+      if (isStopped || !locationData) return;
+      const now = Date.now();
+      if (!force && now - lastDbPersistAt < intervalMs) return;
+      lastDbPersistAt = now;
 
-        // Log location for trip history
-        DriverModel.insertLocationLog({
-          bookingId,
-          driverId,
-          latitude: locationData.lat,
-          longitude: locationData.lng,
-        });
-      },
-      (error) => {
-        console.error('Geolocation error:', error);
-      },
-      {
-        enableHighAccuracy: true,
-        maximumAge: intervalMs,
-        timeout: intervalMs,
+      DriverModel.updateCoordinates(
+        driverId,
+        locationData.lat,
+        locationData.lng,
+        locationData.timestamp
+      );
+
+      DriverModel.insertLocationLog({
+        bookingId,
+        driverId,
+        latitude: locationData.lat,
+        longitude: locationData.lng,
+      });
+    };
+
+    const handlePosition = (position) => {
+      if (isStopped || !position?.coords) return;
+      const { latitude: lat, longitude: lng } = position.coords;
+      if (!isValidLatLng(lat, lng)) return;
+
+      const locationData = {
+        lat: Number(lat),
+        lng: Number(lng),
+        timestamp: new Date().toISOString(),
+        driverId,
+      };
+
+      const isFirstFix = !latestLocation;
+      latestLocation = locationData;
+
+      if (onLocationChange) {
+        onLocationChange({ lat: locationData.lat, lng: locationData.lng });
       }
-    );
+
+      sendBroadcast(locationData);
+      persistToDatabase(locationData, isFirstFix);
+    };
+
+    channel.subscribe((status) => {
+      if (status === 'SUBSCRIBED') {
+        isSubscribed = true;
+        if (latestLocation) {
+          sendBroadcast(latestLocation);
+        }
+      } else if (status === 'CLOSED' || status === 'CHANNEL_ERROR') {
+        isSubscribed = false;
+      }
+    });
+
+    let watchId = null;
+    if (typeof navigator !== 'undefined' && navigator.geolocation) {
+      // Request an immediate GPS fix so stationary devices don't wait for movement
+      navigator.geolocation.getCurrentPosition(
+        handlePosition,
+        (err) => console.warn('Initial GPS lock warning:', err.message),
+        {
+          enableHighAccuracy: true,
+          maximumAge: intervalMs,
+          timeout: 10000,
+        }
+      );
+
+      watchId = navigator.geolocation.watchPosition(
+        handlePosition,
+        (error) => {
+          console.warn('Geolocation watch warning:', error.message);
+        },
+        {
+          enableHighAccuracy: true,
+          maximumAge: intervalMs,
+          timeout: 10000,
+        }
+      );
+    }
+
+    // Periodic heartbeat ensures patients opening/refreshing the tracking page
+    // always receive live coordinates even when the ambulance is stationary.
+    const heartbeatTimer = setInterval(() => {
+      if (isStopped || !latestLocation) return;
+      const refreshedLocation = {
+        ...latestLocation,
+        timestamp: new Date().toISOString(),
+      };
+      sendBroadcast(refreshedLocation);
+      persistToDatabase(refreshedLocation, false);
+    }, intervalMs);
 
     return {
       stop: () => {
-        navigator.geolocation.clearWatch(watchId);
+        isStopped = true;
+        isSubscribed = false;
+        if (watchId !== null && typeof navigator !== 'undefined' && navigator.geolocation) {
+          navigator.geolocation.clearWatch(watchId);
+        }
+        clearInterval(heartbeatTimer);
         supabase.removeChannel(channel);
       },
       channel,
@@ -175,29 +311,85 @@ export const DriverModel = {
   },
 
   /**
-   * Subscribe to real-time driver location broadcasts for a booking (patient-side).
+   * Subscribe to real-time driver location updates for a booking (patient-side).
+   * Combines low-latency WebSocket broadcast with Postgres Realtime fallback
+   * (`public.drivers` and `public.location_logs`) for 100% reliability.
    */
-  subscribeToLocationUpdates(bookingId, onLocationUpdate) {
+  subscribeToLocationUpdates(bookingId, onLocationUpdate, driverId = null) {
+    if (!bookingId) return () => {};
     const supabase = getSupabaseBrowserClient();
-    const topic = `booking:${bookingId}`;
 
-    const existing = supabase
-      .getChannels()
-      .find((ch) => ch.topic === `realtime:${topic}` || ch.topic === topic);
-    if (existing) {
-      supabase.removeChannel(existing);
-    }
+    const emitValidLocation = (lat, lng, timestamp = new Date().toISOString()) => {
+      if (!isValidLatLng(lat, lng)) return;
+      onLocationUpdate({
+        lat: Number(lat),
+        lng: Number(lng),
+        timestamp,
+      });
+    };
 
-    const channel = supabase
-      .channel(topic)
+    // 1. Low-latency Broadcast channel subscription
+    const broadcastTopic = `booking:${bookingId}`;
+    const broadcastChannel = supabase
+      .channel(broadcastTopic, {
+        config: {
+          broadcast: { self: true },
+        },
+      })
       .on('broadcast', { event: 'location_update' }, (message) => {
-        onLocationUpdate(message.payload);
+        const payload = message?.payload;
+        if (payload) {
+          emitValidLocation(payload.lat, payload.lng, payload.timestamp);
+        }
       })
       .subscribe();
 
+    // 2. Postgres Realtime subscription on `location_logs` and `drivers`
+    let dbChannel = supabase
+      .channel(`booking-gps-db:${bookingId}:${Date.now()}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'location_logs',
+          filter: `booking_id=eq.${bookingId}`,
+        },
+        (payload) => {
+          const row = payload?.new;
+          if (row) {
+            emitValidLocation(row.latitude, row.longitude, row.recorded_at);
+          }
+        }
+      );
+
+    if (driverId) {
+      dbChannel = dbChannel.on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'drivers',
+          filter: `id=eq.${driverId}`,
+        },
+        (payload) => {
+          const row = payload?.new;
+          if (row) {
+            emitValidLocation(
+              row.current_lat,
+              row.current_lng,
+              row.last_location_update
+            );
+          }
+        }
+      );
+    }
+
+    dbChannel.subscribe();
+
     return () => {
-      supabase.removeChannel(channel);
+      supabase.removeChannel(broadcastChannel);
+      supabase.removeChannel(dbChannel);
     };
   },
 };
-

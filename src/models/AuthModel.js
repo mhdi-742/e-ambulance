@@ -2,7 +2,11 @@ import { v4 as uuidv4 } from 'uuid';
 import { getSupabaseBrowserClient } from '@/lib/supabase/client';
 import { ProfileModel } from './ProfileModel';
 
-const SESSION_KEY = 'e_ambulance_session_token';
+const LEGACY_SESSION_KEY = 'e_ambulance_session_token';
+
+function getSessionKey(userId) {
+  return userId ? `${LEGACY_SESSION_KEY}:${userId}` : LEGACY_SESSION_KEY;
+}
 
 function getStorage() {
   if (typeof window !== 'undefined') {
@@ -10,6 +14,9 @@ function getStorage() {
   }
   return null;
 }
+
+// In-flight guard so validateSession never races with an active createSession call
+let inFlightSessionCreation = null;
 
 /**
  * AuthModel
@@ -62,10 +69,16 @@ export const AuthModel = {
   },
 
   /**
-   * Get the currently authenticated user.
+   * Get the currently authenticated user (prefers fast local session, falls back to getUser).
    */
   async getCurrentUser() {
     const supabase = getSupabaseBrowserClient();
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+    if (session?.user) {
+      return { user: session.user, error: null };
+    }
     const { data, error } = await supabase.auth.getUser();
     return { user: data?.user || null, error };
   },
@@ -85,39 +98,68 @@ export const AuthModel = {
    * Create and persist a new single-device session token.
    */
   async createSession(userId) {
+    if (!userId) return null;
     const token = uuidv4();
-
-    // Write to localStorage FIRST so Realtime echo never sees a mismatch
     const storage = getStorage();
+    const key = getSessionKey(userId);
+
+    // Write to localStorage first so any immediate Realtime echo matches
     if (storage) {
-      storage.setItem(SESSION_KEY, token);
+      storage.setItem(key, token);
+      storage.setItem(LEGACY_SESSION_KEY, token);
     }
 
-    const { error } = await ProfileModel.updateSessionToken(userId, token);
-    if (error) {
-      console.error('Failed to create session:', error);
-      return null;
-    }
+    const updatePromise = ProfileModel.updateSessionToken(userId, token);
+    inFlightSessionCreation = updatePromise;
 
-    return token;
+    try {
+      const { error } = await updatePromise;
+      if (error) {
+        console.warn('Could not persist session token to database:', error.message);
+        // Roll back local token if DB update failed so validateSession won't see a false mismatch
+        if (storage) {
+          storage.removeItem(key);
+          storage.removeItem(LEGACY_SESSION_KEY);
+        }
+        return null;
+      }
+      return token;
+    } finally {
+      if (inFlightSessionCreation === updatePromise) {
+        inFlightSessionCreation = null;
+      }
+    }
   },
 
   /**
    * Validate that the local session token matches the database token.
    */
   async validateSession(userId) {
+    if (!userId) return true;
+
+    // Wait if createSession is currently writing a new token
+    if (inFlightSessionCreation) {
+      try {
+        await inFlightSessionCreation;
+      } catch {
+        // Ignore
+      }
+    }
+
     const storage = getStorage();
-    const localToken = storage ? storage.getItem(SESSION_KEY) : null;
+    const key = getSessionKey(userId);
+    const localToken = storage ? storage.getItem(key) : null;
 
     const { data, error } = await ProfileModel.getSessionToken(userId);
     if (error || !data) return true;
 
-    // If no token exists in localStorage yet (e.g. right after registration), adopt or initialize
+    // If no user-scoped token exists in localStorage yet, adopt the DB token
     if (!localToken) {
       if (!data.session_token) {
         await AuthModel.createSession(userId);
       } else if (storage) {
-        storage.setItem(SESSION_KEY, data.session_token);
+        storage.setItem(key, data.session_token);
+        storage.setItem(LEGACY_SESSION_KEY, data.session_token);
       }
       return true;
     }
@@ -126,12 +168,20 @@ export const AuthModel = {
   },
 
   /**
-   * Clear the session token from localStorage.
+   * Clear session tokens from localStorage.
    */
-  clearLocalSession() {
+  clearLocalSession(userId = null) {
     const storage = getStorage();
-    if (storage) {
-      storage.removeItem(SESSION_KEY);
+    if (!storage) return;
+    storage.removeItem(LEGACY_SESSION_KEY);
+    if (userId) {
+      storage.removeItem(getSessionKey(userId));
+    } else {
+      Object.keys(storage).forEach((k) => {
+        if (k.startsWith(`${LEGACY_SESSION_KEY}:`)) {
+          storage.removeItem(k);
+        }
+      });
     }
   },
 
@@ -162,7 +212,7 @@ export const AuthModel = {
         (payload) => {
           const newToken = payload.new.session_token;
           const storage = getStorage();
-          const localToken = storage ? storage.getItem(SESSION_KEY) : null;
+          const localToken = storage ? storage.getItem(getSessionKey(userId)) : null;
           if (newToken && localToken && newToken !== localToken) {
             onKicked();
           }
@@ -175,4 +225,3 @@ export const AuthModel = {
     };
   },
 };
-

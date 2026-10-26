@@ -4,6 +4,7 @@ import Navbar from '@/components/layout/Navbar';
 import StatusBadge from '@/components/ui/StatusBadge';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import Modal from '@/components/ui/Modal';
+import Toast from '@/components/ui/Toast';
 import TrackingMap from '@/components/map/TrackingMap';
 
 /**
@@ -23,6 +24,8 @@ export default function TrackBookingView({
   showCancelModal,
   setShowCancelModal,
   cancelling,
+  toast,
+  setToast,
   handleCancel,
   goToDashboard,
 }) {
@@ -53,6 +56,10 @@ export default function TrackBookingView({
   return (
     <div className="min-h-screen bg-zinc-950 text-white">
       <Navbar />
+
+      {toast && (
+        <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />
+      )}
 
       <main className="max-w-2xl mx-auto px-4 sm:px-6 pt-24 pb-12">
         {/* Header */}
@@ -198,4 +205,3 @@ export default function TrackBookingView({
     </div>
   );
 }
-

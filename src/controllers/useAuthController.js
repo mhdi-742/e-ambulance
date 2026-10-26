@@ -77,7 +77,7 @@ export function SessionProvider({ children }) {
       setProfile(prof);
       let driver = null;
       if (prof.role === 'driver') {
-        const { data: drv } = await DriverModel.getByProfileId(authUser.id);
+        const { data: drv } = await DriverModel.ensureByProfile(authUser);
         driver = drv || null;
         setDriverData(driver);
       } else {
@@ -121,7 +121,9 @@ export function SessionProvider({ children }) {
         if (cached?.user?.id === session.user.id && cached?.profile) {
           setProfile(cached.profile);
           setDriverData(cached.driverData || null);
-          setLoading(false);
+          if (cached.profile.role !== 'driver' || cached.driverData) {
+            setLoading(false);
+          }
         }
 
         const isValid = await AuthModel.validateSession(session.user.id);
@@ -266,7 +268,7 @@ export function useLoginController() {
 
     let driver = null;
     if (role === 'driver') {
-      const { data: drv } = await DriverModel.getByProfileId(data.user.id);
+      const { data: drv } = await DriverModel.ensureByProfile(data.user);
       driver = drv || null;
     }
 

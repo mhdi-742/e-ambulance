@@ -22,15 +22,19 @@ export function useAdminDashboardController() {
   const [recentBookings, setRecentBookings] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    const fetchDashboard = async () => {
-      const summary = await BookingModel.getAdminDashboardSummary();
-      setStats(summary.stats);
-      setRecentBookings(summary.recentBookings);
-      setLoading(false);
-    };
+  const fetchDashboard = useCallback(async () => {
+    const summary = await BookingModel.getAdminDashboardSummary();
+    setStats(summary.stats);
+    setRecentBookings(summary.recentBookings);
+    setLoading(false);
+  }, []);
 
+  useEffect(() => {
     fetchDashboard();
+
+    const unsubscribe = BookingModel.subscribeToAllBookings('admin-dashboard-live', () => {
+      fetchDashboard();
+    });
 
     const interval = setInterval(() => {
       if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
@@ -38,8 +42,11 @@ export function useAdminDashboardController() {
       }
     }, 30000);
 
-    return () => clearInterval(interval);
-  }, []);
+    return () => {
+      unsubscribe();
+      clearInterval(interval);
+    };
+  }, [fetchDashboard]);
 
   const statCards = [
     { label: 'Active Dispatches', value: stats.activeBookings },
@@ -64,20 +71,25 @@ export function useAdminBookingsController() {
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('all');
 
-  const fetchBookings = useCallback(async () => {
-    const { data } = await BookingModel.getAdminList({ filter, limit: 50 });
-    setBookings(data);
-    setLoading(false);
-  }, [filter]);
+  const fetchBookings = useCallback(
+    async ({ silent = false } = {}) => {
+      if (!silent) {
+        setLoading(true);
+      }
+      const { data } = await BookingModel.getAdminList({ filter, limit: 50 });
+      setBookings(data);
+      setLoading(false);
+    },
+    [filter]
+  );
 
   useEffect(() => {
-    setLoading(true);
-    fetchBookings();
+    fetchBookings({ silent: false });
   }, [fetchBookings]);
 
   useEffect(() => {
     const unsubscribe = BookingModel.subscribeToAllBookings('admin-bookings-live', () => {
-      fetchBookings();
+      fetchBookings({ silent: true });
     });
 
     return () => {
@@ -121,7 +133,11 @@ export function useAdminDriversController() {
   }, [fetchDrivers]);
 
   const toggleOnline = async (driverId, currentStatus) => {
-    await DriverModel.setOnlineStatus(driverId, !currentStatus);
+    const { error } = await DriverModel.setOnlineStatus(driverId, !currentStatus);
+    if (error) {
+      setToast({ message: error.message || 'Failed to update driver status', type: 'error' });
+      return;
+    }
     setToast({ message: 'Driver status updated', type: 'success' });
     fetchDrivers();
   };
@@ -182,7 +198,11 @@ export function useAdminHospitalsController() {
   };
 
   const toggleActive = async (id, current) => {
-    await HospitalModel.toggleActive(id, current);
+    const { error } = await HospitalModel.toggleActive(id, current);
+    if (error) {
+      setToast({ message: error.message || 'Failed to update hospital status', type: 'error' });
+      return;
+    }
     setToast({
       message: `Hospital ${!current ? 'activated' : 'deactivated'}`,
       type: 'success',
@@ -191,7 +211,15 @@ export function useAdminHospitalsController() {
   };
 
   const deleteHospital = async (id) => {
-    await HospitalModel.remove(id);
+    const { error } = await HospitalModel.remove(id);
+    if (error) {
+      const msg =
+        error.code === '23503'
+          ? 'Cannot delete a hospital with existing booking history. Deactivate it instead.'
+          : error.message || 'Failed to delete hospital';
+      setToast({ message: msg, type: 'error' });
+      return;
+    }
     setToast({ message: 'Hospital deleted', type: 'success' });
     fetchHospitals();
   };
@@ -211,4 +239,3 @@ export function useAdminHospitalsController() {
     deleteHospital,
   };
 }
-
